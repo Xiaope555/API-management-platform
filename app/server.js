@@ -22,7 +22,7 @@ const { spawn } = require('child_process');
 
 const ROOT = path.join(__dirname, 'www');
 const HOST = '127.0.0.1';
-const VERSION = '1.2.4';
+const VERSION = '1.2.5';
 
 const argv = process.argv.slice(2);
 const wantOpen = argv.indexOf('--open') >= 0 || process.env.AIHUB_OPEN === '1';

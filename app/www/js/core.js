@@ -10,7 +10,7 @@
 /* 版本号显示。APK 里用这个常量（跟随构建更新）；网页版启动后会被服务端
    /api/health 报告的版本覆盖（见 main.js 的 boot）—— 因为这里曾经硬编码成
    1.2.0 一直没跟着发版更新，用户装了新版本却看到旧号，根本分不清有没有生效。 */
-let APP_VERSION = '1.2.4';
+let APP_VERSION = '1.2.5';
 const STORE_KEY = 'aihub.v1';
 const LOG_LIMIT = 500;
 
@@ -480,6 +480,28 @@ const Store = (function () {
   }
 
   /* ---- 演示数据 ---- */
+
+  /* 演示账号的 id 是固定的；用户自己建的账号用随机 id，撞不上 */
+  const DEMO_ACC = ['ac_demo1', 'ac_demo2', 'ac_demo3', 'ac_demo4', 'ac_demo5', 'ac_demo6'];
+
+  /* 当前数据里有没有演示数据 */
+  function isDemo() {
+    return (all().accounts || []).some((a) => DEMO_ACC.indexOf(a.id) >= 0);
+  }
+
+  /* 只清演示数据，用户自己建的账号和记录留着。
+     以前只有「一个个删」和「清空全部数据」（后者会把自己的账号也删掉），
+     所以载入演示数据等于走进一条出不来的路。 */
+  function clearDemo() {
+    const d = all();
+    const aBefore = (d.accounts || []).length;
+    const lBefore = (d.logs || []).length;
+    d.accounts = (d.accounts || []).filter((a) => DEMO_ACC.indexOf(a.id) < 0);
+    d.logs = (d.logs || []).filter((l) => DEMO_ACC.indexOf(String(l.accountId || '')) < 0);
+    save();
+    return { accounts: aBefore - d.accounts.length, logs: lBefore - d.logs.length };
+  }
+
   function loadDemo() {
     const d = DEFAULT_DATA();
     d.accounts = [
@@ -509,7 +531,7 @@ const Store = (function () {
     platforms, platform, addPlatform,
     accounts, accountsOf, account, addAccount, updateAccount, removeAccount, setCred,
     logs: () => all().logs, addLog, clearLogs, removeLog,
-    exportData, exportJson, importJson, wipe, loadDemo,
+    exportData, exportJson, importJson, wipe, loadDemo, isDemo, clearDemo,
     DEFAULT_DATA,
   };
 })();

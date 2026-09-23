@@ -136,6 +136,19 @@ Screens.overview = function (root) {
 
   let html = '';
 
+  /* ---------- 演示数据横幅 ----------
+     载入演示数据原本是一条「进得去出不来」的路：账号全是假的，界面上却没有任何
+     说明，也没有一键清掉的地方（设置里的「清空全部数据」会把用户自己建的账号也删了）。
+     所以只要数据里还有演示账号，就在总览最上面挂这条横幅，并就地给出口。 */
+  if (Store.isDemo()) {
+    html += '<div class="card flat" style="border:1px solid var(--brand-l);background:var(--brand-l);' +
+      'display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">' +
+      '<span class="t-xs" style="color:var(--brand-d);flex:1 1 170px;line-height:1.7">' +
+      '当前是<b>演示数据</b>：这些账号和调用记录都是假的，不是你的真实密钥。</span>' +
+      '<button class="btn soft sm" data-cleardemo>清除演示数据</button>' +
+      '</div>';
+  }
+
   /* ---------- 四个数字块 ---------- */
   html += '<div class="stats">' +
     '<div class="stat accent"><span class="st-lab">余额合计</span>' +
@@ -270,7 +283,25 @@ Screens.overview = function (root) {
   }));
   const rall = root.querySelector('[data-refresh-all]');
   if (rall) rall.addEventListener('click', refreshAllBalances);
+
+  /* 横幅上的一键清除 */
+  const cdemo = root.querySelector('[data-cleardemo]');
+  if (cdemo) cdemo.addEventListener('click', () => clearDemoFlow());
 };
+
+/* 清除演示数据：把 6 个假账号与它们的记录删掉，用户自己建的账号不受影响。
+   清完落到总览的空状态，正好接着「添加第一个账号」。 */
+function clearDemoFlow() {
+  UI.confirmDialog('清除演示数据', '演示用的假账号和假记录会被删掉；你自己添加的账号不受影响。', () => {
+    const r = Store.clearDemo();
+    VS.accountId = null;
+    UI.toast('已清除 ' + r.accounts + ' 个演示账号、' + r.logs + ' 条演示记录', 'ok');
+    route = { name: 'overview', param: null, edit: null };
+    stack = [];
+    syncHash('replace');
+    render();
+  }, '清除');
+}
 
 /**
  * 刷新单个账号余额。
@@ -1313,7 +1344,12 @@ Screens.settings = function (root) {
     '<span class="l-sub">保留账号，只清日志（' + Store.logs().length + ' 条）</span></span><span class="c-3">›</span></button>' +
     '<button class="lrow" style="width:100%;text-align:left" data-demo>' +
     '<span class="l-main"><span class="l-title">载入演示数据</span>' +
-    '<span class="l-sub">会写入几个假账号和假记录，用来看效果</span></span><span class="c-3">›</span></button>' +
+    '<span class="l-sub">会写入几个假账号和假记录，用来看效果（随时可以只清掉它们）</span></span><span class="c-3">›</span></button>' +
+    (Store.isDemo()
+      ? '<button class="lrow" style="width:100%;text-align:left" data-cleardemo>' +
+        '<span class="l-main"><span class="l-title">清除演示数据</span>' +
+        '<span class="l-sub">删掉那几个假账号和假记录，自己添加的账号不受影响</span></span><span class="c-3">›</span></button>'
+      : '') +
     '<button class="lrow" style="width:100%;text-align:left" data-wipe>' +
     '<span class="l-main"><span class="l-title c-rose">清空全部数据</span>' +
     '<span class="l-sub">账号、密钥、记录全部删除，不可恢复</span></span><span class="c-3">›</span></button>' +
@@ -1382,10 +1418,15 @@ Screens.settings = function (root) {
   });
 
   root.querySelector('[data-demo]').addEventListener('click', () => {
-    UI.confirmDialog('载入演示数据', '会覆盖当前账号与记录，写入 6 个假账号和 8 条假调用记录。旧数据不会保留。', () => {
-      Store.loadDemo(); VS.accountId = null; UI.toast('已载入演示数据', 'ok'); render();
-    }, '载入');
+    UI.confirmDialog('载入演示数据',
+      '会覆盖当前账号与记录，写入 6 个假账号和 8 条假调用记录。旧数据不会保留。载入后想退出，用「清除演示数据」即可。',
+      () => {
+        Store.loadDemo(); VS.accountId = null; UI.toast('已载入演示数据', 'ok'); render();
+      }, '载入');
   });
+
+  const cdemo = root.querySelector('[data-cleardemo]');
+  if (cdemo) cdemo.addEventListener('click', () => clearDemoFlow());
 
   root.querySelector('[data-wipe]').addEventListener('click', () => {
     UI.confirmDialog('清空全部数据', '账号、密钥、调用记录会全部删除，无法恢复。建议先导出备份。', () => {

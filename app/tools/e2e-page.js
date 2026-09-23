@@ -722,8 +722,35 @@
     }
     ok('导航：按钮在可视区内（抽屉底部不会溢出屏幕）',
       !!quitBtn && quitBtn.getBoundingClientRect().width > 0, quitBtn && Math.round(quitBtn.getBoundingClientRect().width));
+
+    /* --- 20.11 演示数据必须「进得去，也出得来」 ---
+       用户的原话是「点了载入演示数据，出现一堆 API，然后就无法退出这个了」。
+       因为载入会把 demo 账号灌满，而界面上既没说明那是假的、也没一键清掉的地方
+       （「清空全部数据」会连自己建的账号一起删）。 */
+    Store.loadDemo();
+    ok('演示数据：载入后能被识别出来（界面才有依据挂横幅）', Store.isDemo() === true, '');
     go('overview');
-    await sleep(60);
+    await sleep(80);
+    ok('演示数据：总览页出现「当前是演示数据」横幅与清除按钮',
+      !!document.querySelector('#view [data-cleardemo]'), '');
+    const mine = Store.addAccount({ platformId: 'custom', label: '我自己的号', apiKey: 'sk-keep-1234567890', baseUrl: 'https://x.example.com/v1' });
+    const cleared = Store.clearDemo();
+    ok('演示数据：清除只删演示账号（6 个），自己建的账号留着',
+      Store.isDemo() === false && cleared.accounts === 6 && !!Store.account(mine.id), cleared);
+    ok('演示数据：演示的那些假记录也一并清掉',
+      Store.logs().every((l) => String(l.accountId).indexOf('ac_demo') !== 0), Store.logs().length);
+
+    go('settings');
+    await sleep(80);
+    ok('演示数据：清除后设置页不再显示清除入口（入口只在有演示数据时出现）',
+      !document.querySelector('#view [data-cleardemo]'), '');
+
+    /* 复原成后续布局断言可用的干净状态 */
+    Store.wipe();
+    const keep = Store.addAccount({ platformId: 'openai', label: '布局用账号', apiKey: 'sk-layout-1234567890', baseUrl: 'https://api.openai.com/v1' });
+    Store.addLog({ accountId: keep.id, platformId: 'openai', model: 'gpt-4o-mini', kind: 'chat', status: 'ok', code: 200, latencyMs: 900 });
+    go('overview');
+    await sleep(80);
   } else {
     ok('窄屏计算值：当前视口不是窄屏，跳过（由 e2e-desktop 复核电脑端）', true, window.innerWidth);
   }
