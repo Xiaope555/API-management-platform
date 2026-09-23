@@ -95,7 +95,11 @@ function renderNav() {
   const el = $('#nav');
   const r = route;
 
-  function menuBtn() { return '<button class="icon-btn" id="menu-btn" title="菜单">' + ICON.menu + '</button>'; }
+  function menuBtn() {
+    /* 带上「菜单」两个字：光一个汉堡图标，用户不一定会去点它 */
+    return '<button class="icon-btn" id="menu-btn" title="打开导航菜单">' +
+      ICON.menu + '<span class="mb-label">菜单</span></button>';
+  }
   function backBtn() { return '<button class="icon-btn back" data-back title="返回">' + ICON.back + '</button>'; }
 
   if (r.name === 'account') {
@@ -318,24 +322,63 @@ async function refreshAllBalances() {
 
 /* ------------------------------------------------------------ 导航 */
 
+/* 每一层页面都推进一条浏览器历史 —— 手机上的系统返回键、侧滑返回、
+   浏览器返回键走的都是同一条路：能退就退一层，退到根才退出应用。
+
+   早先这里用的是 history.replaceState（只改地址不产生历史），
+   于是安卓的返回键在 WebView 里 canGoBack() 永远是 false，
+   一按就直接杀掉整个应用 —— 用户看到的现象就是「进了总览，出不去」。 */
 function go(name, param, edit) {
   stack.push({ name: route.name, param: route.param, edit: route.edit });
   route = { name: name, param: param || null, edit: edit || null };
   if (name === 'add') Screens.add._pid = Screens.add._pid || 'openai';
-  syncHash();
+  syncHash('push');
   render();
 }
 
 function back() {
   const prev = stack.pop();
   route = prev || { name: 'overview', param: null, edit: null };
-  syncHash();
+  syncHash('replace');
   render();
 }
 
-function syncHash() {
-  let h = '#/' + route.name + (route.param ? '/' + route.param : '');
-  if (history.replaceState) history.replaceState(null, '', h);
+function syncHash(mode) {
+  const h = '#/' + route.name + (route.param ? '/' + route.param : '');
+  if (!history.pushState) return;
+  /* 我们自己退一层时用 replace：历史里那一条已经被系统返回键消费掉了，
+     再 push 会把用户困在「退不完」的循环里。 */
+  if (mode === 'push') history.pushState({ aihub: h }, '', h);
+  else history.replaceState({ aihub: h }, '', h);
+}
+
+/* 系统返回键 / 手势返回 的统一处理顺序：
+   关弹层 → 关抽屉 → 退一层 → 回总览 → 再按一次退出应用 */
+let lastBackAt = 0;
+function systemBack() {
+  const sheetRoot = $('#sheet-root');
+  if (sheetRoot && sheetRoot.querySelector('.sheet')) { UI.closeSheet(); return 'sheet'; }
+  if (document.body.classList.contains('nav-open')) { closeDrawer(); return 'drawer'; }
+  if (stack.length) { back(); return 'up'; }
+  if (route.name !== 'overview') {
+    route = { name: 'overview', param: null, edit: null };
+    syncHash('replace');
+    render();
+    return 'home';
+  }
+  if (Date.now() - lastBackAt < 2000) { exitApp(); return 'exit'; }
+  lastBackAt = Date.now();
+  UI.toast('再按一次返回键退出');
+  return 'confirm-exit';
+}
+
+/* 退出应用：APK 里交给 Capacitor；网页版没有这回事，退回上一层即可 */
+function exitApp() {
+  try {
+    const P = window.Capacitor && window.Capacitor.Plugins;
+    if (P && P.App && P.App.exitApp) { P.App.exitApp(); return; }
+  } catch (_) {}
+  try { history.go(-1); } catch (_) {}
 }
 
 /* ------------------------------------------------------------ 启动 */
@@ -372,10 +415,20 @@ function parseHash() {
     }
   });
 
-  /* 浏览器返回键 */
+  /* 浏览器返回键 / 手机侧滑返回 */
   window.addEventListener('popstate', () => {
+    /* 历史里还有上一页就退一层；已经到根了什么都不做，交给浏览器/系统 */
     if (stack.length) { back(); }
   });
+
+  /* 系统返回键（APK）。装了 Capacitor App 插件时由我们接管，
+     顺序与上面一致；没装也能用 —— WebView 的历史里已经有每一层页面了。 */
+  try {
+    const P = window.Capacitor && window.Capacitor.Plugins;
+    if (P && P.App && P.App.addListener) {
+      P.App.addListener('backButton', () => { systemBack(); });
+    }
+  } catch (_) {}
 
   /* 首次进入给个提示 */
   setTimeout(() => {

@@ -640,6 +640,60 @@
     ok('窄屏破坏性复核：这时底部 Tab 依然点得到（命中测试通过）', tabHit, tabHit);
     breaker.remove();
     await sleep(60);
+
+    /* --- 20.8 系统返回键：手机上最本能的动作必须能逐层退出 ---
+       曾经 go() 用的是 replaceState（只改地址、不产生历史），于是安卓返回键
+       在 WebView 里 canGoBack() 恒为 false，一按就杀掉整个应用 ——
+       这就是「进了总览出不去」在手机上的另一半原因。 --- */
+    go('logs');
+    await sleep(60);
+    ok('返回键：进入子页面后历史里留下了一条（系统返回键才有得退）',
+      !!(history.state && history.state.aihub === '#/logs'), history.state);
+    ok('返回键：系统返回会先退一层，回到总览',
+      systemBack() === 'up' && route.name === 'overview', { ret: route.name, hash: location.hash });
+
+    stack = [];
+    go('settings');
+    await sleep(60);
+    ok('返回键：从设置页返回同样退回总览（不是直接退出应用）',
+      systemBack() === 'up' && route.name === 'overview', route.name);
+
+    document.body.classList.add('nav-open');
+    ok('返回键：抽屉开着时先关抽屉',
+      systemBack() === 'drawer' && !document.body.classList.contains('nav-open'), '');
+
+    UI.openSheet({ title: '返回键测试', html: '<div>内容</div>' });
+    await sleep(60);
+    const sheetBack = systemBack();
+    ok('返回键：弹层开着时先关弹层', sheetBack === 'sheet', sheetBack);
+    await sleep(320);            // closeSheet 有 240ms 动画，节点是之后才移除的
+    ok('返回键：关掉之后弹层真的从 DOM 里消失了',
+      !document.querySelector('#sheet-root .sheet'), '');
+
+    /* 已经在根页面了：第一次只提示，不能把用户直接踢出去 */
+    UI.closeSheet(true);
+    stack = [];
+    route = { name: 'overview', param: null, edit: null };
+    render();
+    await sleep(80);
+    const rootBack = systemBack();
+    ok('返回键：已在总览时先提示「再按一次退出」，不直接踢出去',
+      rootBack === 'confirm-exit', rootBack);
+
+    /* --- 20.9 「菜单」按钮必须自己说明自己是什么 --- */
+    const mb2 = document.querySelector('#menu-btn');
+    ok('窄屏计算值：「菜单」按钮带文字，不是一个光秃秃的汉堡',
+      mb2 && /菜单/.test(mb2.textContent) && mb2.getBoundingClientRect().width > 40,
+      { text: mb2 && mb2.textContent.trim(), w: mb2 && Math.round(mb2.getBoundingClientRect().width) });
+    ok('窄屏计算值：点「菜单」会打开抽屉',
+      (function () {
+        mb2.click();
+        const open = document.body.classList.contains('nav-open');
+        document.body.classList.remove('nav-open');
+        return open;
+      })(), '');
+    go('overview');
+    await sleep(60);
   } else {
     ok('窄屏计算值：当前视口不是窄屏，跳过（由 e2e-desktop 复核电脑端）', true, window.innerWidth);
   }

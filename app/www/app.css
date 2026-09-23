@@ -178,6 +178,16 @@ table { border-collapse: collapse; }
 }
 #nav .icon-btn:active { background: rgba(34,32,29,.06); }
 #nav .icon-btn.back { margin-left: -6px; }
+/* 窄屏的「菜单」按钮：不是光秃秃一个汉堡，带上文字，一眼看得出能点、
+   点开是导航。权重用两个 id，压过 `#nav .icon-btn` 的圆形 34px。 */
+#nav #menu-btn {
+  width: auto; height: 34px;
+  padding: 0 12px 0 9px; gap: 5px;
+  border-radius: var(--r-pill);
+  background: var(--card-2);
+  color: var(--tx);
+}
+#nav #menu-btn .mb-label { font-size: 12px; font-weight: 500; letter-spacing: .2px; }
 /* 汉堡按钮只在小屏出现。
    这里必须写成 `#nav #menu-btn`（两个 id）—— `#nav .icon-btn` 的权重是 (1,1,0)，
    比单个 id 的 (1,0,0) 高，直接用 `#menu-btn` 会被它的 display:flex 盖掉，
