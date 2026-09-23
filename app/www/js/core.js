@@ -7,20 +7,59 @@
 
 /* ---------------------------------------------------------------- 常量 */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const STORE_KEY = 'aihub.v1';
 const LOG_LIMIT = 500;
 
-/** 预置平台。baseUrl 是官方默认值，用户可改（中转站/代理） */
+/**
+ * 预置平台。baseUrl 是官方默认值，用户可改（中转站/代理）。
+ *
+ * balanceKind 决定「怎么读余额」，四类：
+ *   deepseek / moonshot / siliconflow / openrouter —— 官方公开接口，拿 API Key 直接查
+ *   panel   —— New API / One API 系中转站，要先拿账号密码登录面板
+ *   manual  —— 平台没开余额接口，只能手动填
+ * 旧数据里没有 balanceKind，靠 BALANCE_KIND_BY_ID 按平台 id 兜底。
+ */
 const PRESET_PLATFORMS = [
-  { id: 'openai',    name: 'OpenAI',    color: '#0B7BD4', baseUrl: 'https://api.openai.com/v1',            balance: 'manual', doc: 'https://platform.openai.com/api-keys' },
-  { id: 'deepseek',  name: 'DeepSeek',  color: '#4D6BFE', baseUrl: 'https://api.deepseek.com/v1',          balance: 'auto',   doc: 'https://platform.deepseek.com/api_keys' },
-  { id: 'anthropic', name: 'Anthropic', color: '#C96442', baseUrl: 'https://api.anthropic.com/v1',         balance: 'manual', doc: 'https://console.anthropic.com/settings/keys' },
-  { id: 'moonshot',  name: 'Moonshot',  color: '#111827', baseUrl: 'https://api.moonshot.cn/v1',           balance: 'auto',   doc: 'https://platform.moonshot.cn/console/api-keys' },
-  { id: 'zhipu',     name: '智谱 GLM',   color: '#2E5BFF', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', balance: 'manual', doc: 'https://open.bigmodel.cn/usercenter/apikeys' },
-  { id: 'dashscope', name: '阿里通义',   color: '#615CED', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', balance: 'manual', doc: 'https://bailian.console.aliyun.com/' },
-  { id: 'custom',    name: '自定义 / 中转站', color: '#6BA8A0', baseUrl: '', balance: 'manual', doc: '' },
+  { id: 'openai',      name: 'OpenAI',      color: '#0B7BD4', baseUrl: 'https://api.openai.com/v1',            balanceKind: 'manual',      doc: 'https://platform.openai.com/api-keys' },
+  { id: 'deepseek',    name: 'DeepSeek',    color: '#4D6BFE', baseUrl: 'https://api.deepseek.com/v1',          balanceKind: 'deepseek',    doc: 'https://platform.deepseek.com/api_keys' },
+  { id: 'anthropic',   name: 'Anthropic',   color: '#C96442', baseUrl: 'https://api.anthropic.com/v1',         balanceKind: 'manual',      doc: 'https://console.anthropic.com/settings/keys' },
+  { id: 'moonshot',    name: 'Moonshot',    color: '#111827', baseUrl: 'https://api.moonshot.cn/v1',           balanceKind: 'moonshot',    doc: 'https://platform.moonshot.cn/console/api-keys' },
+  { id: 'siliconflow', name: '硅基流动',     color: '#6E56CF', baseUrl: 'https://api.siliconflow.cn/v1',        balanceKind: 'siliconflow', doc: 'https://cloud.siliconflow.cn/account/ak' },
+  { id: 'openrouter',  name: 'OpenRouter',  color: '#6467F2', baseUrl: 'https://openrouter.ai/api/v1',         balanceKind: 'openrouter',  doc: 'https://openrouter.ai/settings/keys' },
+  { id: 'zhipu',       name: '智谱 GLM',     color: '#2E5BFF', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', balanceKind: 'manual',      doc: 'https://open.bigmodel.cn/usercenter/apikeys' },
+  { id: 'dashscope',   name: '阿里通义',     color: '#615CED', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', balanceKind: 'manual', doc: 'https://bailian.console.aliyun.com/' },
+  { id: 'custom',      name: '中转站 / 自定义', color: '#6BA8A0', baseUrl: '',                                  balanceKind: 'panel',       doc: '' },
 ];
+
+/** 平台 id → 余额读取方式。给没有 balanceKind 的旧数据兜底 */
+const BALANCE_KIND_BY_ID = {
+  deepseek: 'deepseek',
+  moonshot: 'moonshot',
+  siliconflow: 'siliconflow',
+  openrouter: 'openrouter',
+  custom: 'panel',
+};
+
+function balanceKindOf(plat) {
+  const p = plat || {};
+  if (p.balanceKind) return p.balanceKind;
+  return BALANCE_KIND_BY_ID[p.id] || 'manual';
+}
+
+/** 能不能自动读余额（手动类不能） */
+function canAutoBalance(plat) {
+  return balanceKindOf(plat) !== 'manual';
+}
+
+const BALANCE_KIND_LABEL = {
+  deepseek: 'DeepSeek 官方接口',
+  moonshot: 'Moonshot 官方接口',
+  siliconflow: '硅基流动官方接口',
+  openrouter: 'OpenRouter 官方接口',
+  panel: '中转站面板',
+  manual: '手动填写',
+};
 
 /** 参考单价，单位：元 / 100 万 tokens。仅用于本地估算，与平台账单必然有出入 */
 const PRICING = {
@@ -187,6 +226,49 @@ function estimateCost(model, inTok, outTok) {
 
 /* ---------------------------------------------------------------- 数据层 */
 
+/**
+ * 账号对象的规范化。
+ * 老数据里只有 `balanceManual`（布尔），现在换成 `balanceSource`（来源字符串），
+ * 这样界面能说清「这个余额是手动填的还是从哪个接口读回来的」。
+ */
+function normalizeAccount(a) {
+  const o = Object.assign({
+    id: uid('ac'),
+    platformId: 'custom',
+    label: '主账号',
+    apiKey: '',
+    baseUrl: '',
+    defaultModel: '',
+    balance: null,
+    balanceSource: null,
+    balanceNative: null,
+    balanceUpdatedAt: null,
+    cred: null,
+    createdAt: Date.now(),
+  }, a);
+  if (!o.balanceSource && typeof o.balance === 'number') {
+    o.balanceSource = a.balanceManual ? 'manual' : null;
+  }
+  delete o.balanceManual;
+  return o;
+}
+
+/** 面板凭据：token 永远留着（省得每次都要重新登录），密码看用户勾没勾 */
+function normalizeCred(c) {
+  if (!c || typeof c !== 'object') return null;
+  return {
+    mode: c.mode === 'password' ? 'password' : 'panel',
+    username: String(c.username || ''),
+    password: c.password ? String(c.password) : '',
+    savePassword: !!c.savePassword,
+    token: c.token ? String(c.token) : '',
+    tokenAt: c.tokenAt || null,
+    userId: c.userId != null ? c.userId : null,
+    lastError: c.lastError || '',
+    lastAt: c.lastAt || null,
+  };
+}
+
 const DEFAULT_DATA = () => ({
   version: 1,
   platforms: JSON.parse(JSON.stringify(PRESET_PLATFORMS)),
@@ -196,8 +278,20 @@ const DEFAULT_DATA = () => ({
     timeoutMs: 30000,
     verifyMaxTokens: 64,
     defaultPrompt: '你好，请用一句话介绍你自己。',
+    /** 美元换人民币的汇率。OpenRouter / 中转站面板按美元折算，统一用这个价换成本地金额 */
+    usdRate: 7.3,
   },
 });
+
+/** 本地金额统一是人民币。外币来源按 settings.usdRate 折算，折算过程留在 balanceNative 里可回溯 */
+function toCNY(amount, currency, rate) {
+  const a = Number(amount);
+  if (!isFinite(a)) return null;
+  const cur = String(currency || 'CNY').toUpperCase();
+  if (cur === 'CNY' || cur === 'RMB') return { cny: a, rate: 1, converted: false };
+  const r = Number(rate) > 0 ? Number(rate) : 7.3;
+  return { cny: a * r, rate: r, converted: true };
+}
 
 const Store = (function () {
   let data = null;
@@ -211,7 +305,9 @@ const Store = (function () {
         data.settings = Object.assign(DEFAULT_DATA().settings, parsed.settings || {});
         if (!Array.isArray(data.platforms) || !data.platforms.length) data.platforms = DEFAULT_DATA().platforms;
         if (!Array.isArray(data.accounts)) data.accounts = [];
+        data.accounts = data.accounts.filter((a) => a && a.id).map(normalizeAccount);
         if (!Array.isArray(data.logs)) data.logs = [];
+        mergePresetPlatforms();
       } else {
         data = DEFAULT_DATA();
         save();
@@ -221,6 +317,27 @@ const Store = (function () {
       data = DEFAULT_DATA();
     }
     return data;
+  }
+
+  /**
+   * 把新版本新增的预置平台补进已有数据里，并给老平台补上 balanceKind。
+   * 不覆盖用户改过的 name / baseUrl —— 只补缺的字段。
+   */
+  function mergePresetPlatforms() {
+    if (!data || !Array.isArray(data.platforms)) return;
+    PRESET_PLATFORMS.forEach((pre) => {
+      const cur = data.platforms.filter((p) => p.id === pre.id)[0];
+      if (!cur) {
+        data.platforms.push(JSON.parse(JSON.stringify(pre)));
+        return;
+      }
+      if (!cur.balanceKind && pre.balanceKind) cur.balanceKind = pre.balanceKind;
+      if (!cur.color) cur.color = pre.color;
+    });
+    /* 用户自建的平台（id 是 pf_xxx）没有 balanceKind，按「中转站」处理最不容易错 */
+    data.platforms.forEach((p) => {
+      if (!p.balanceKind) p.balanceKind = BALANCE_KIND_BY_ID[p.id] || 'panel';
+    });
   }
 
   function save() {
@@ -258,17 +375,19 @@ const Store = (function () {
     return all().accounts.filter((a) => a.id === id)[0] || null;
   }
   function addAccount(a) {
-    const item = Object.assign({
+    const item = normalizeAccount(Object.assign({
       id: uid('ac'),
       platformId: 'custom',
       label: '主账号',
       apiKey: '',
       baseUrl: '',
       balance: null,
-      balanceManual: false,
+      balanceSource: null,
+      balanceNative: null,
       balanceUpdatedAt: null,
+      cred: null,
       createdAt: Date.now(),
-    }, a);
+    }, a));
     if (!item.baseUrl) {
       const p = platform(item.platformId);
       item.baseUrl = (p && p.baseUrl) || '';
@@ -279,7 +398,18 @@ const Store = (function () {
   }
   function updateAccount(id, patch) {
     const a = account(id);
-    if (a) { Object.assign(a, patch); save(); }
+    if (!a) return null;
+    Object.assign(a, patch);
+    if ('cred' in patch) a.cred = normalizeCred(a.cred);
+    save();
+    return a;
+  }
+  /** 只改凭据的某几个字段，避免把 token 覆盖掉 */
+  function setCred(id, credPatch) {
+    const a = account(id);
+    if (!a) return null;
+    a.cred = normalizeCred(Object.assign({}, a.cred || {}, credPatch || {}));
+    save();
     return a;
   }
   function removeAccount(id) {
@@ -308,21 +438,37 @@ const Store = (function () {
   }
 
   /* ---- 导入导出 ---- */
-  function exportJson() {
-    return JSON.stringify(all(), null, 2);
+  /**
+   * 导出前的清洗。默认把「面板登录密码」和「面板 token」剥掉：
+   * 备份文件最容易被随手丢到网盘或聊天窗口里，一份明文的面板账号密码跟着跑出去不合适。
+   * 想连凭据一起备份，得显式传 { includeCreds: true }。
+   */
+  function exportData(opts) {
+    const includeCreds = !!(opts && opts.includeCreds);
+    const copy = JSON.parse(JSON.stringify(all()));
+    (copy.accounts || []).forEach((a) => {
+      if (!a.cred) return;
+      a.cred = includeCreds ? a.cred : { mode: a.cred.mode, username: a.cred.username || '' };
+    });
+    return copy;
+  }
+  function exportJson(opts) {
+    return JSON.stringify(exportData(opts), null, 2);
   }
   function importJson(text) {
     const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== 'object') throw new Error('不是合法的数据对象');
     if (!Array.isArray(parsed.accounts)) throw new Error('缺少 accounts 字段');
-    const merged = {
+    data = {
       version: 1,
-      platforms: Array.isArray(parsed.platforms) && parsed.platforms.length ? parsed.platforms : DEFAULT_DATA().platforms,
-      accounts: parsed.accounts,
+      platforms: Array.isArray(parsed.platforms) && parsed.platforms.length
+        ? parsed.platforms
+        : JSON.parse(JSON.stringify(DEFAULT_DATA().platforms)),
+      accounts: parsed.accounts.filter((a) => a && a.id).map(normalizeAccount),
       logs: Array.isArray(parsed.logs) ? parsed.logs : [],
       settings: Object.assign(DEFAULT_DATA().settings, parsed.settings || {}),
     };
-    data = merged;
+    mergePresetPlatforms();
     save();
   }
   function wipe() {
@@ -334,10 +480,12 @@ const Store = (function () {
   function loadDemo() {
     const d = DEFAULT_DATA();
     d.accounts = [
-      { id: 'ac_demo1', platformId: 'openai',   label: '主账号',   apiKey: 'sk-proj-DEMOxxxxxxxxxxxxxxxxxxxxxxxxxxxx4f2a', baseUrl: 'https://api.openai.com/v1', balance: 52.40, balanceManual: true, balanceUpdatedAt: Date.now() - 3600e3, createdAt: Date.now() - 86400e3 * 30 },
-      { id: 'ac_demo2', platformId: 'openai',   label: '备用账号', apiKey: 'sk-proj-DEMOyyyyyyyyyyyyyyyyyyyyyyyyyyyy7b19', baseUrl: 'https://api.openai.com/v1', balance: 30.00, balanceManual: true, balanceUpdatedAt: Date.now() - 7200e3, createdAt: Date.now() - 86400e3 * 12 },
-      { id: 'ac_demo3', platformId: 'deepseek', label: '主账号',   apiKey: 'sk-DEMOzzzzzzzzzzzzzzzzzzzzzzzzzzzzc410', baseUrl: 'https://api.deepseek.com/v1', balance: 88.60, balanceManual: false, balanceUpdatedAt: Date.now() - 600e3, createdAt: Date.now() - 86400e3 * 20 },
-      { id: 'ac_demo4', platformId: 'anthropic',label: '主账号',   apiKey: 'sk-ant-DEMOaaaaaaaaaaaaaaaaaaaaaaaaa9e77', baseUrl: 'https://api.anthropic.com/v1', balance: 12.20, balanceManual: true, balanceUpdatedAt: Date.now() - 86400e3, createdAt: Date.now() - 86400e3 * 8 },
+      { id: 'ac_demo1', platformId: 'openai',   label: '主账号',   apiKey: 'sk-proj-DEMOxxxxxxxxxxxxxxxxxxxxxxxxxxxx4f2a', baseUrl: 'https://api.openai.com/v1', balance: 52.40, balanceSource: 'manual', balanceUpdatedAt: Date.now() - 3600e3, createdAt: Date.now() - 86400e3 * 30 },
+      { id: 'ac_demo2', platformId: 'openai',   label: '备用账号', apiKey: 'sk-proj-DEMOyyyyyyyyyyyyyyyyyyyyyyyyyyyy7b19', baseUrl: 'https://api.openai.com/v1', balance: 30.00, balanceSource: 'manual', balanceUpdatedAt: Date.now() - 7200e3, createdAt: Date.now() - 86400e3 * 12 },
+      { id: 'ac_demo3', platformId: 'deepseek', label: '主账号',   apiKey: 'sk-DEMOzzzzzzzzzzzzzzzzzzzzzzzzzzzzc410', baseUrl: 'https://api.deepseek.com/v1', balance: 88.60, balanceSource: 'deepseek', balanceUpdatedAt: Date.now() - 600e3, createdAt: Date.now() - 86400e3 * 20 },
+      { id: 'ac_demo4', platformId: 'anthropic',label: '主账号',   apiKey: 'sk-ant-DEMOaaaaaaaaaaaaaaaaaaaaaaaaa9e77', baseUrl: 'https://api.anthropic.com/v1', balance: 12.20, balanceSource: 'manual', balanceUpdatedAt: Date.now() - 86400e3, createdAt: Date.now() - 86400e3 * 8 },
+      { id: 'ac_demo5', platformId: 'custom',   label: '中转站号', apiKey: 'sk-DEMOrelayxxxxxxxxxxxxxxxxxxxxxxxxxx88a1', baseUrl: 'https://relay.example.com/v1', balance: 216.05, balanceSource: 'panel', balanceNative: { amount: 29.60, currency: 'USD' }, balanceUpdatedAt: Date.now() - 1800e3, cred: { mode: 'panel', username: 'demo@example.com', password: '', savePassword: false, token: '', userId: 1, lastAt: Date.now() - 1800e3 }, createdAt: Date.now() - 86400e3 * 40 },
+      { id: 'ac_demo6', platformId: 'openrouter', label: '主账号', apiKey: 'sk-or-v1-DEMObbbbbbbbbbbbbbbbbbbbbbbbb3c04', baseUrl: 'https://openrouter.ai/api/v1', balance: 0, balanceSource: null, balanceUpdatedAt: null, createdAt: Date.now() - 86400e3 * 3 },
     ];
     d.logs = [
       { id: 'lg_d1', ts: Date.now() - 600e3,    accountId: 'ac_demo1', platformId: 'openai',    model: 'gpt-4o-mini',       kind: 'verify', status: 'ok', code: 200, inTok: 32,    outTok: 24,    latencyMs: 1200, costCNY: 0.0001, preview: '' },
@@ -346,6 +494,8 @@ const Store = (function () {
       { id: 'lg_d4', ts: Date.now() - 86400e3,  accountId: 'ac_demo4', platformId: 'anthropic', model: 'claude-sonnet-4',   kind: 'chat',   status: 'ok', code: 200, inTok: 3120,  outTok: 980,   latencyMs: 3100, costCNY: 0.1684, preview: '' },
       { id: 'lg_d5', ts: Date.now() - 90000e3,  accountId: 'ac_demo2', platformId: 'openai',    model: 'gpt-3.5-turbo',     kind: 'verify', status: 'err',  code: 401, inTok: 0,     outTok: 0,     latencyMs: 420,  costCNY: 0,      preview: '', errorMsg: '服务端拒绝鉴权：该密钥无效或已被撤销' },
       { id: 'lg_d6', ts: Date.now() - 100000e3, accountId: 'ac_demo3', platformId: 'deepseek',  model: 'deepseek-reasoner', kind: 'chat',   status: 'ok', code: 200, inTok: 2060,  outTok: 1480,  latencyMs: 8400, costCNY: 0.0319, preview: '' },
+      { id: 'lg_d7', ts: Date.now() - 115000e3, accountId: 'ac_demo5', platformId: 'custom',    model: 'claude-sonnet-4',   kind: 'chat',   status: 'ok', code: 200, inTok: 4180,  outTok: 1620,  latencyMs: 5200, costCNY: 0.2580, preview: '' },
+      { id: 'lg_d8', ts: Date.now() - 130000e3, accountId: 'ac_demo5', platformId: 'custom',    model: 'gpt-4o',            kind: 'verify', status: 'ok', code: 200, inTok: 40,    outTok: 18,    latencyMs: 980,  costCNY: 0.0018, preview: '' },
     ];
     data = d;
     save();
@@ -354,9 +504,9 @@ const Store = (function () {
   return {
     load, save, all, settings, setSetting,
     platforms, platform, addPlatform,
-    accounts, accountsOf, account, addAccount, updateAccount, removeAccount,
+    accounts, accountsOf, account, addAccount, updateAccount, removeAccount, setCred,
     logs: () => all().logs, addLog, clearLogs, removeLog,
-    exportJson, importJson, wipe, loadDemo,
+    exportData, exportJson, importJson, wipe, loadDemo,
     DEFAULT_DATA,
   };
 })();
@@ -749,31 +899,23 @@ const Api = {
     };
   },
 
-  /** 余额查询：目前只有部分平台提供公开接口，其余返回 unsupported */
-  async balance(account, platform) {
-    const plat = platform || {};
-    if (plat.balance !== 'auto') {
-      return { ok: false, kind: 'unsupported', message: '该平台未提供公开的余额接口，请手动填写' };
+  /**
+   * 余额查询（薄封装，真正的实现在 Balance 里）。
+   * 保留这个入口是为了让调用方只关心「成没成」，不用管走的是官方接口还是面板登录。
+   */
+  async balance(account, platform, opts) {
+    const r = await Balance.query(account, platform, opts);
+    if (r.ok) {
+      return { ok: true, balance: r.amount, currency: r.currency, extra: r.extra || [], via: r.via, raw: r.raw };
     }
-    let url;
-    if (plat.id === 'deepseek') {
-      let b = String(account.baseUrl || plat.baseUrl || '').replace(/\/v\d+\/?$/, '');
-      url = apiUrl(b, '/user/balance');
-    } else {
-      return { ok: false, kind: 'unsupported', message: '该平台暂未适配余额查询' };
-    }
-    const r = await Net.request({ url, method: 'GET', headers: { Authorization: 'Bearer ' + account.apiKey, Accept: 'application/json' }, timeoutMs: 15000 });
-    if (!r.ok) return { ok: false, kind: r.kind, message: r.message };
-    if (r.status !== 200) return { ok: false, kind: r.kind, status: r.status, message: errMessageOf(r) };
-    try {
-      const j = JSON.parse(r.body);
-      const info = (j.balance_infos && j.balance_infos[0]) || {};
-      const total = Number(info.total_balance != null ? info.total_balance : j.total_balance);
-      if (isNaN(total)) throw new Error('响应里没有余额字段');
-      return { ok: true, balance: total, currency: info.currency || j.currency || 'CNY', raw: j };
-    } catch (e) {
-      return { ok: false, kind: 'parse', message: '解析余额失败：' + e.message, raw: r.body };
-    }
+    /* 'manual' 对外统一成 unsupported，历史调用方认这个值 */
+    return {
+      ok: false,
+      kind: r.kind === 'manual' ? 'unsupported' : r.kind,
+      status: r.httpStatus,
+      message: r.message,
+      raw: r.raw,
+    };
   },
 };
 
@@ -794,6 +936,487 @@ function errMessageOf(r, json) {
   return 'HTTP ' + r.status;
 }
 
+/* ---------------------------------------------------------------- 余额
+ *
+ * 现实里「查余额」有两套完全不同的口径，必须分开对待：
+ *
+ *   A. 官方平台（DeepSeek / Moonshot / 硅基流动 / OpenRouter）
+ *      平台自己开放了余额接口，拿 API Key 直接查，不需要账号密码。
+ *
+ *   B. New API / One API 系中转站
+ *      没有对外的余额接口，但面板自己有登录接口。先拿站点账号密码登录换
+ *      access_token，再读 /api/user/self。两条硬边界（上游这么设计的，不是我们偷懒）：
+ *        · 站点开了 Turnstile 人机验证 → 脚本登录过不去，只能手动填余额；
+ *        · 站点开了密码加密 → 按 new-api 官方前端的做法，用 WebCrypto 做
+ *          RSA-OAEP(SHA-256) 加密后再提交，见 encryptPanelPassword。
+ *
+ * 金额口径统一：本机一律存人民币。外币按 settings.usdRate 折算，
+ * 原始金额留在 balanceNative 里，界面上随时能回溯。
+ * ------------------------------------------------------------------ */
+
+const Balance = (function () {
+  const BAL_TIMEOUT = 15000;
+
+  /* ---- URL 小工具 ---- */
+  function trimSlash(s) { return String(s || '').trim().replace(/\/+$/, ''); }
+  /** 去掉结尾的 /v1、/v4 这类版本段，得到站点根 */
+  function siteRoot(base) { return trimSlash(base).replace(/\/v\d+$/i, ''); }
+  function withScheme(b) {
+    const t = trimSlash(b);
+    if (!t) return '';
+    return /^https?:\/\//i.test(t) ? t : 'https://' + t;
+  }
+  function bearer(k) { return { Authorization: 'Bearer ' + String(k || ''), Accept: 'application/json' }; }
+
+  function numOf(v) {
+    if (v == null || v === '') return null;
+    const n = Number(v);
+    return isFinite(n) ? n : null;
+  }
+
+  /* ---------------------------------------------------------------- 密码加密
+     new-api 的前端在站点开启「密码加密登录」时，会先用 /api/user/login/encryption-key
+     拿一个 RSA 公钥，把密码做 RSA-OAEP(SHA-256) 加密再 POST 上去。
+     这里按同样的做法来，这样开了这个开关的站点也能登录。
+     WebCrypto 只在安全上下文里有（127.0.0.1 / https / APK 内壳都算），
+     用普通 http 域名打开网页版时拿不到，要给出明确提示而不是静默失败。 */
+  function pemToDer(pem) {
+    const body = String(pem || '')
+      .replace(/-----BEGIN PUBLIC KEY-----/, '')
+      .replace(/-----END PUBLIC KEY-----/, '')
+      .replace(/\s+/g, '');
+    const bin = atob(body);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes.buffer;
+  }
+  function b64Of(buf) {
+    const bytes = new Uint8Array(buf);
+    let s = '';
+    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s);
+  }
+  async function encryptPanelPassword(password, publicKeyPem) {
+    const subtle = (typeof crypto !== 'undefined' && crypto.subtle) || null;
+    if (!subtle) {
+      throw new Error('当前页面不是安全上下文（WebCrypto 不可用），无法加密密码。请用 http://127.0.0.1 打开，或使用 APK 版本。');
+    }
+    const key = await subtle.importKey('spki', pemToDer(publicKeyPem),
+      { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt']);
+    const modLen = (key.algorithm && key.algorithm.modulusLength) || 2048;
+    const plain = new TextEncoder().encode(String(password));
+    if (plain.byteLength > modLen / 8 - 66) {
+      throw new Error('密码过长，超出该站点公钥能加密的长度');
+    }
+    const ct = await subtle.encrypt({ name: 'RSA-OAEP' }, key, plain);
+    return b64Of(ct);
+  }
+
+  /* ---------------------------------------------------------------- 中转站面板
+     凭据链：/api/status（探站点）→ 可选 /api/user/login/encryption-key
+             → /api/user/login（换 token）→ /api/user/self（读余额） */
+
+  async function panelStatus(base) {
+    const root = siteRoot(withScheme(base));
+    if (!root) return { ok: false, kind: 'bad_request', message: '账号没填 BaseURL' };
+    const r = await Net.request({ url: root + '/api/status', method: 'GET', headers: { Accept: 'application/json' }, timeoutMs: BAL_TIMEOUT });
+    if (!r.ok) return { ok: false, kind: r.kind, message: r.message, root: root };
+    /* 401 / 403 同样说明「这儿不是面板」。
+       New API 系的 /api/status 是公开端点，匿名就能读；真要是个面板，
+       绝不会对匿名请求要鉴权。用户把官方 API 域名（api.openai.com 之类）
+       填进中转站账号时，撞的就是这个 401 —— 这时候提示「账号密码不对」
+       会把人带偏，正确的话是「这不是面板地址」。 */
+    if (r.status === 401 || r.status === 403 || r.status === 404) {
+      return { ok: false, kind: 'not_panel', status: r.status, root: root, raw: r.body,
+               message: r.status === 404
+                 ? '这个地址上没有 /api/status（404），看起来不是 New API / One API 系的中转站面板'
+                 : `这个地址上的 /api/status 要鉴权（HTTP ${r.status}）——面板的这个接口本该是公开的，所以它不是面板` };
+    }
+    if (r.status !== 200) {
+      return { ok: false, kind: r.kind, status: r.status, root: root, raw: r.body, message: errMessageOf(r) };
+    }
+    try {
+      const j = JSON.parse(r.body);
+      const d = (j && j.data) || j || {};
+      if (!j || (j.success === false)) throw new Error('站点返回 success=false');
+      return {
+        ok: true, root: root, status: r.status, raw: r.body,
+        info: {
+          turnstile: !!(d.turnstile_check),
+          siteKey: d.turnstile_site_key || '',
+          quotaPerUnit: numOf(d.quota_per_unit) || 500000,
+          displayInCurrency: d.display_in_currency,
+          usdRate: numOf(d.usd_exchange_rate),
+          pwdEncryption: !!(d.password_login_encryption_enabled),
+          version: d.version || '',
+          name: d.system_name || d.name || '',
+        },
+      };
+    } catch (e) {
+      return { ok: false, kind: 'parse', status: r.status, root: root, raw: r.body,
+               message: '/api/status 的返回不是面板格式：' + e.message };
+    }
+  }
+
+  async function panelEncryptionKey(root) {
+    const r = await Net.request({ url: root + '/api/user/login/encryption-key', method: 'GET', headers: { Accept: 'application/json' }, timeoutMs: BAL_TIMEOUT });
+    if (!r.ok) return { ok: false, kind: r.kind, message: r.message };
+    if (r.status !== 200) return { ok: false, kind: r.kind, status: r.status, message: errMessageOf(r) };
+    let j = null;
+    try { j = JSON.parse(r.body); } catch (_) {}
+    const d = (j && j.data) || {};
+    if (!d.public_key) return { ok: false, kind: 'parse', message: '该站点没有返回可用于加密的公钥' };
+    return { ok: true, kid: d.kid || '', publicKey: d.public_key };
+  }
+
+  function panelErrMessage(j, r) {
+    const msg = (j && (j.message || (j.error && j.error.message))) || '';
+    if (msg) return String(msg);
+    if (r.status === 401) return '账号或密码不对（该站点拒绝了这次登录）';
+    if (r.status === 404) return '这个地址上没有 /api/user/login，不是面板站点';
+    return errMessageOf(r);
+  }
+
+  /**
+   * 面板登录 → { ok, token, user } / { ok:false, kind, message }
+   * kind: auth_invalid 账号密码错 / turnstile 有人机验证 / need_encryption 加密不可用 …
+   */
+  async function panelLogin(base, username, password) {
+    const st = await panelStatus(base);
+    if (!st.ok) return st;
+    if (st.info.turnstile) {
+      return {
+        ok: false, kind: 'turnstile', root: st.root, status: st,
+        message: '该站点开启了人机验证（Cloudflare Turnstile），脚本没法自动登录。可以在浏览器里登录后把 access token 粘进来，或者直接手动填余额。',
+      };
+    }
+
+    const payload = { username: String(username || ''), password: String(password || '') };
+    if (!payload.username || !payload.password) {
+      return { ok: false, kind: 'bad_request', root: st.root, status: st, message: '请先填写该站点的登录账号和密码' };
+    }
+
+    if (st.info.pwdEncryption) {
+      const k = await panelEncryptionKey(st.root);
+      if (!k.ok) return { ok: false, kind: k.kind, root: st.root, status: st, message: '读取加密公钥失败：' + k.message };
+      try {
+        payload.password_encrypted = await encryptPanelPassword(payload.password, k.publicKey);
+        payload.encryption_key_id = k.kid;
+        delete payload.password;
+      } catch (e) {
+        return { ok: false, kind: 'crypto', root: st.root, status: st, message: '加密密码失败：' + e.message };
+      }
+    }
+
+    const r = await Net.request({
+      url: st.root + '/api/user/login', method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: payload, timeoutMs: BAL_TIMEOUT,
+    });
+    if (!r.ok) return { ok: false, kind: r.kind, root: st.root, status: st, message: r.message };
+
+    let j = null;
+    try { j = JSON.parse(r.body); } catch (_) {}
+    if (r.status !== 200 || !j || j.success === false || !(j.data && (j.data.access_token || j.data.token))) {
+      const kind = r.status === 401 || r.status === 400 ? 'auth_invalid' : r.kind;
+      return { ok: false, kind: kind, root: st.root, status: st, httpStatus: r.status, raw: r.body,
+               message: panelErrMessage(j, r) };
+    }
+
+    const d = j.data;
+    return {
+      ok: true, root: st.root, status: st, raw: r.body,
+      token: d.access_token || d.token,
+      user: d.user || null,
+      expiresAt: d.access_expires_at || null,
+    };
+  }
+
+  /** 用 token 读面板上的自己 → { ok, user } */
+  async function panelSelf(base, token) {
+    const root = siteRoot(withScheme(base));
+    const r = await Net.request({
+      url: root + '/api/user/self', method: 'GET',
+      headers: { Authorization: 'Bearer ' + String(token || ''), Accept: 'application/json' },
+      timeoutMs: BAL_TIMEOUT,
+    });
+    if (!r.ok) return { ok: false, kind: r.kind, message: r.message };
+    let j = null;
+    try { j = JSON.parse(r.body); } catch (_) {}
+    if (r.status === 401 || r.status === 403) {
+      return { ok: false, kind: 'token_expired', httpStatus: r.status, raw: r.body,
+               message: '登录凭据已失效，需要重新登录一次' };
+    }
+    if (r.status !== 200 || !j || j.success === false || !j.data) {
+      return { ok: false, kind: r.kind === 'ok' ? 'parse' : r.kind, httpStatus: r.status, raw: r.body,
+               message: panelErrMessage(j, r) };
+    }
+    return { ok: true, user: j.data, raw: r.body };
+  }
+
+  /** 把面板 user 里的 quota 折算成金额。new-api 的口径：quota / quota_per_unit = 美元 */
+  function amountOfPanelUser(user, info) {
+    const u = user || {};
+    const quota = numOf(u.quota);
+    if (quota == null) return { ok: false, kind: 'parse', message: '面板没有返回 quota 字段，读不到余额' };
+    const per = Number(info && info.quotaPerUnit) > 0 ? Number(info.quotaPerUnit) : 500000;
+    const usd = quota / per;
+    const extra = [
+      { k: '站点配额 quota', v: num(quota) },
+      { k: '每美元配额', v: num(per) },
+      { k: '折算余额', v: '$' + usd.toFixed(4) },
+    ];
+    const used = numOf(u.used_quota);
+    if (used != null) extra.push({ k: '已消耗配额', v: num(used) + '（≈$' + (used / per).toFixed(4) + '）' });
+    if (info && info.usdRate) extra.push({ k: '站内汇率', v: '1 USD = ¥' + info.usdRate });
+    if (u.username) extra.push({ k: '面板账号', v: String(u.username) });
+    if (u.group) extra.push({ k: '用户分组', v: String(u.group) });
+    if (info && info.version) extra.push({ k: '站点版本', v: String(info.version) });
+    return { ok: true, amount: usd, currency: 'USD', extra: extra, user: u };
+  }
+
+  /** 面板全流程：优先复用已有 token，不行再用账号密码换一个 */
+  async function queryPanel(account, opts) {
+    const o = opts || {};
+    const rawBase = account.baseUrl;
+    if (!withScheme(rawBase)) return { ok: false, kind: 'bad_request', message: '这个账号还没填 BaseURL，没法定位面板' };
+
+    const cred = normalizeCred(account.cred);
+    const username = (o.username != null ? o.username : (cred && cred.username)) || '';
+    const password = (o.password != null ? o.password : (cred && cred.password)) || '';
+    const token = (o.token != null ? o.token : (cred && cred.token)) || '';
+
+    /* 1. 先试已经在手上的 token —— 拿到面板第一次登录后，之后就不必再输密码 */
+    if (token) {
+      const self = await panelSelf(rawBase, token);
+      if (self.ok) {
+        const st = await panelStatus(rawBase);
+        const amt = amountOfPanelUser(self.user, st.ok ? st.info : null);
+        if (amt.ok) {
+          return Object.assign({ ok: true, via: 'token', root: siteRoot(withScheme(rawBase)) },
+            amt, { status: st.ok ? st : null, raw: self.raw });
+        }
+        return amt;
+      }
+      /* token 过期：如果没留密码也没这次现输的密码，就别硬着头皮往下走 */
+      if (!username || !password) {
+        return {
+          ok: false, kind: 'token_expired', root: siteRoot(withScheme(rawBase)),
+          message: '这个站点上次登录的凭据已经失效了，请重新登录一次（或手动填余额）。',
+        };
+      }
+    }
+
+    /* 2. 没有可用 token → 用账号密码登录 */
+    if (!username || !password) {
+      return {
+        ok: false, kind: 'need_login', root: siteRoot(withScheme(rawBase)),
+        message: '这是中转站面板，需要先填入该站点的登录账号和密码才能读余额',
+      };
+    }
+    const login = await panelLogin(rawBase, username, password);
+    if (!login.ok) return login;
+
+    const self = await panelSelf(login.root, login.token);
+    if (!self.ok) return self;
+
+    const amt = amountOfPanelUser(self.user, login.status.ok ? login.status.info : null);
+    if (!amt.ok) return amt;
+
+    return Object.assign({
+      ok: true, via: 'login', root: login.root,
+      token: login.token, expiresAt: login.expiresAt,
+      status: login.status, raw: self.raw,
+    }, amt);
+  }
+
+  /* ---------------------------------------------------------------- 官方平台
+     每家一个接口，形状都不一样，所以一家一段。 */
+  const OFFICIAL = {
+    deepseek: {
+      label: 'DeepSeek',
+      path: '/user/balance',
+      pick(j) {
+        const infos = Array.isArray(j.balance_infos) ? j.balance_infos : [];
+        const info = infos[0] || {};
+        const total = numOf(j.total_balance != null ? j.total_balance : info.total_balance);
+        if (total == null) return { ok: false, kind: 'parse', message: '返回里没有 balance_infos[].total_balance' };
+        const extra = [];
+        if (info.granted_balance != null) extra.push({ k: '赠金余额', v: String(info.granted_balance) });
+        if (info.topped_up_balance != null) extra.push({ k: '充值余额', v: String(info.topped_up_balance) });
+        if (j.is_available != null) extra.push({ k: '账户可用', v: j.is_available ? '是' : '否' });
+        return { ok: true, amount: total, currency: info.currency || j.currency || 'CNY', extra: extra };
+      },
+    },
+    moonshot: {
+      label: 'Moonshot',
+      path: '/v1/users/me/balance',
+      pick(j) {
+        const d = j.data || j;
+        const total = numOf(d.available_balance);
+        if (total == null) return { ok: false, kind: 'parse', message: '返回里没有 data.available_balance' };
+        const extra = [];
+        if (d.voucher_balance != null) extra.push({ k: '代金券余额', v: '¥' + d.voucher_balance });
+        if (d.cash_balance != null) extra.push({ k: '现金余额', v: '¥' + d.cash_balance });
+        return { ok: true, amount: total, currency: 'CNY', extra: extra };
+      },
+    },
+    siliconflow: {
+      label: '硅基流动',
+      path: '/v1/user/info',
+      pick(j) {
+        const d = j.data || j;
+        const total = numOf(d.totalBalance != null ? d.totalBalance : d.balance);
+        if (total == null) return { ok: false, kind: 'parse', message: '返回里没有 data.totalBalance' };
+        const extra = [];
+        if (d.chargeBalance != null) extra.push({ k: '充值余额', v: '¥' + d.chargeBalance });
+        if (d.balance != null) extra.push({ k: '赠送余额', v: '¥' + d.balance });
+        if (d.name) extra.push({ k: '账户', v: String(d.name) });
+        return { ok: true, amount: total, currency: 'CNY', extra: extra };
+      },
+    },
+    openrouter: {
+      label: 'OpenRouter',
+      path: '/v1/key',
+      async pick(j, acct) {
+        const d = j.data || j;
+        const left = numOf(d.limit_remaining);
+        const extra = [];
+        if (d.label) extra.push({ k: '密钥备注', v: String(d.label) });
+        if (d.limit != null) extra.push({ k: '该密钥额度上限', v: '$' + d.limit });
+        if (d.usage != null) extra.push({ k: '该密钥已用', v: '$' + d.usage });
+        if (left != null) {
+          extra.push({ k: '读取方式', v: '/api/v1/key（普通密钥的剩余额度）' });
+          return { ok: true, amount: left, currency: 'USD', extra: extra };
+        }
+        /* 普通密钥没有限额时读不到账户总额度，退一步试 credits（需要 Management Key） */
+        const root = siteRoot(withScheme(acct.baseUrl || 'https://openrouter.ai/api/v1'));
+        const r2 = await Net.request({ url: root + '/v1/credits', method: 'GET', headers: bearer(acct.apiKey), timeoutMs: BAL_TIMEOUT });
+        if (r2.ok && r2.status === 200) {
+          let j2 = null;
+          try { j2 = JSON.parse(r2.body); } catch (_) {}
+          const d2 = (j2 && j2.data) || {};
+          const tc = numOf(d2.total_credits), tu = numOf(d2.total_usage);
+          if (tc != null && tu != null) {
+            extra.push({ k: '累计充值', v: '$' + tc });
+            extra.push({ k: '累计消耗', v: '$' + tu });
+            extra.push({ k: '读取方式', v: '/api/v1/credits（Management Key）' });
+            return { ok: true, amount: tc - tu, currency: 'USD', extra: extra };
+          }
+        }
+        return {
+          ok: false, kind: 'parse',
+          message: '这把密钥是充值计费型（没有设置额度上限），OpenRouter 只能靠 Management Key 才能读到账户总余额',
+        };
+      },
+    },
+  };
+
+  async function queryOfficial(account, kind, opts) {
+    const p = OFFICIAL[kind];
+    if (!p) return { ok: false, kind: 'unsupported', message: '这个平台还没适配余额查询' };
+    const root = siteRoot(withScheme(account.baseUrl));
+    if (!root) return { ok: false, kind: 'bad_request', message: '这个账号还没填 BaseURL' };
+    const url = root + p.path;
+    const req = { method: 'GET', url: url };
+    const r = await Net.request({ url: url, method: 'GET', headers: bearer(account.apiKey), timeoutMs: BAL_TIMEOUT });
+    if (!r.ok) return { ok: false, kind: r.kind, message: r.message, request: req };
+    if (r.status !== 200) {
+      const hint = r.status === 401
+        ? '该平台的余额接口拒绝了这把密钥（401）。检查密钥是否填错，或这个账号是不是该平台的。'
+        : errMessageOf(r);
+      return { ok: false, kind: r.kind, httpStatus: r.status, message: hint, raw: r.body, request: req };
+    }
+    let j = null;
+    try { j = JSON.parse(r.body); } catch (e) {
+      return { ok: false, kind: 'parse', httpStatus: r.status, message: p.label + ' 的余额返回不是 JSON', raw: r.body, request: req };
+    }
+    const out = await p.pick(j, account);
+    if (!out.ok) return Object.assign({ httpStatus: r.status, raw: r.body, request: req }, out);
+    return Object.assign({ via: 'official', provider: kind, label: p.label, request: req, raw: r.body }, out);
+  }
+
+  /* ---------------------------------------------------------------- 对外 */
+
+  /**
+   * 读一个账号的余额。
+   * 返回 { ok, amount, currency, extra, via, ... } 或 { ok:false, kind, message }
+   * kind 取值：manual / need_login / turnstile / auth_invalid / token_expired /
+   *            token_rejected / not_panel / parse / network / timeout / cors / …
+   */
+  async function query(account, platform, opts) {
+    const o = opts || {};
+    const plat = platform || (Store.platform(account.platformId) || {});
+    const kind = o.kind || balanceKindOf(plat);
+    if (kind === 'manual') {
+      return { ok: false, kind: 'manual',
+               message: '该平台没有公开的余额查询接口，只能手动填写（' + (plat.name || '未命名') + '）' };
+    }
+    if (kind === 'panel') return queryPanel(account, o);
+    return queryOfficial(account, kind, o);
+  }
+
+  /** 把查到的结果写回账号，顺便落盘 token / 清掉失效的 token */
+  function applyResult(accountId, r, opts) {
+    const o = opts || {};
+    if (r.ok) {
+      const rate = o.rate != null ? o.rate : Store.settings().usdRate;
+      const conv = toCNY(r.amount, r.currency, rate);
+      const patch = {
+        balance: conv ? Number(conv.cny.toFixed(4)) : null,
+        balanceSource: r.via === 'login' || r.via === 'token' ? 'panel' : (r.provider || 'manual'),
+        balanceNative: conv && conv.converted ? { amount: r.amount, currency: r.currency } : null,
+        balanceUpdatedAt: Date.now(),
+      };
+      Store.updateAccount(accountId, patch);
+      const credPatch = { lastError: '', lastAt: Date.now() };
+      if (r.token) { credPatch.token = r.token; credPatch.tokenAt = Date.now(); }
+      if (r.user) {
+        credPatch.userId = r.user.id != null ? r.user.id : null;
+        if (r.user.username) credPatch.username = r.user.username;
+      }
+      if (o.username) credPatch.username = o.username;
+      if (o.password) {
+        credPatch.password = o.rememberPassword ? o.password : '';
+        credPatch.savePassword = !!o.rememberPassword;
+      }
+      Store.setCred(accountId, credPatch);
+      return { ok: true, cny: patch.balance, native: patch.balanceNative, currency: r.currency, amount: r.amount };
+    }
+    /* 失败时把原因留在凭据里，界面上能一眼看到上次为什么没读到 */
+    Store.setCred(accountId, { lastError: r.message || '', lastAt: Date.now() });
+    if (r.kind === 'token_expired' || r.kind === 'token_rejected') Store.setCred(accountId, { token: '' });
+    return { ok: false, kind: r.kind, message: r.message };
+  }
+
+  /** 批量刷新。并发 3，避免把中转站打爆 */
+  async function refreshAll(list, onEach) {
+    const items = (list || []).slice();
+    const out = [];
+    let cursor = 0;
+    async function worker() {
+      while (cursor < items.length) {
+        const it = items[cursor++];
+        let res;
+        try { res = await query(it.account, it.platform); }
+        catch (e) { res = { ok: false, kind: 'network', message: String((e && e.message) || e) }; }
+        const applied = applyResult(it.account.id, res);
+        out.push({ id: it.account.id, result: applied });
+        if (onEach) onEach(it.account, applied);
+      }
+    }
+    await Promise.all([worker(), worker(), worker()]);
+    return out;
+  }
+
+  return {
+    query, applyResult, refreshAll,
+    panelStatus, panelLogin, panelSelf,
+    encryptPanelPassword, siteRoot, withScheme,
+    PROVIDERS: OFFICIAL,
+  };
+})();
+
 /** 把失败归类成「用户该做什么」 */
 const FAIL_HINT = {
   auth_invalid:   { tone: 'err',  title: '验证失败', msg: '服务端拒绝鉴权：该密钥无效或已被撤销', todo: ['密钥复制不完整，或前后多了空格 / 换行', '该密钥已在平台侧被撤销或已过期', 'BaseURL 填错，请求打到了非本平台的地址', '账号额度用尽，被服务端限流'] },
@@ -807,6 +1430,13 @@ const FAIL_HINT = {
   bad_request:    { tone: 'err',  title: '请求被拒绝', msg: '参数格式有问题',                      todo: ['检查模型名是否正确', '检查 max_tokens 等参数', '展开请求诊断看原始返回'] },
   parse:          { tone: 'warn', title: '响应认不出来', msg: 'HTTP 通了，但返回体不是任何一种已知的对话结构', todo: ['BaseURL 可能指向了非对话接口（模型列表 / 余额 / 网页）', '若是中转站，检查它是否改写了返回格式', '展开下面的请求诊断，看原始返回长什么样', '把诊断内容发出来，可以针对性适配这种格式'] },
   unsupported:    { tone: 'mute', title: '不支持自动查询', msg: '该平台没有公开的余额接口',        todo: ['手动填写余额并定期更新'] },
+  manual:         { tone: 'mute', title: '只能手动填余额', msg: '该平台没有公开的余额查询接口',  todo: ['手动填一个数，只在总览里做汇总用', '平台侧改过余额后回来更新一下'] },
+  need_login:     { tone: 'warn', title: '需要登录面板', msg: '这是中转站，得先填站点账号密码',  todo: ['在下面「中转站面板登录」里填该站点的账号密码', '登录一次之后会记住凭据，之后就能一键刷新', '不想给密码？也可以在浏览器登录后把 token 粘进来'] },
+  turnstile:      { tone: 'warn', title: '站点开了人机验证', msg: 'Turnstile 验证挡住了脚本登录',      todo: ['这是站点侧的开关，脚本无法绕过', '在浏览器里登录该站点，把 access token 粘贴到下面', '或者直接手动填一个余额数字'] },
+  token_expired:  { tone: 'warn', title: '登录凭据已失效', msg: '站点把上次的登录 token 作废了',    todo: ['重新登录一次即可', '若站点改过密码，记得同步更新'] },
+  token_rejected: { tone: 'err',  title: '登录凭据被拒绝', msg: '站点不认这个 access token',        todo: ['确认这个 token 是该站点签发的', '重新登录一次拿新的 token'] },
+  not_panel:      { tone: 'warn', title: '不是面板站点', msg: '这个地址上没有 /api/status',        todo: ['确认 BaseURL 指向的是中转站面板', '官方平台（DeepSeek 等）用的是 API Key 直查，不需要登录'] },
+  crypto:         { tone: 'err',  title: '密码加密失败', msg: '站点要求加密密码，但当前环境做不了加密', todo: ['改用 http://127.0.0.1 打开网页版（WebCrypto 需要安全上下文）', '或者换成 APK 版本', '也可以手动填余额'] },
 };
 
 /* 兜底文案。注意 kind='ok' 也会走到这里 —— 那是「HTTP 200 但归类没跟上」，

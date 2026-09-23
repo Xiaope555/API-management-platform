@@ -290,6 +290,247 @@
   ok('兜底文案非空（不会出现空白的原因列表）', failInfo('ok').todo.length > 0 && failInfo(undefined).todo.length > 0, failInfo('ok').todo);
   ok('parse 的指引指向「看请求诊断」', failInfo('parse').todo.join(' ').indexOf('诊断') >= 0, failInfo('parse').todo);
 
+  /* ===================================================================
+     19. 余额自动读取
+     两条完全不同的路子：
+       官方平台 —— 拿 API Key 直查，四家返回形状各异，都要能认；
+       中转站面板 —— 先登录换 token，再读 /api/user/self，还要应付
+                     人机验证与密码加密这两种站点配置。
+     =================================================================== */
+
+  const mk = (id, base, key) => Store.addAccount({
+    platformId: id, label: 'E2E ' + id,
+    apiKey: key || 'sk-mock-1234567890', baseUrl: base,
+  });
+  const P_CUSTOM = Store.platform('custom');
+
+  /* --- 19.1 四家官方接口 --- */
+  const aDS = mk('deepseek', 'http://127.0.0.1:8899');
+  const bDS = await Balance.query(aDS, Store.platform('deepseek'));
+  ok('余额·DeepSeek 官方接口读到 88.60', bDS.ok === true && bDS.amount === 88.6 && bDS.currency === 'CNY',
+    { ok: bDS.ok, amount: bDS.amount, cur: bDS.currency, msg: bDS.message });
+
+  const aMS = mk('moonshot', 'http://127.0.0.1:8899/v1');
+  const bMS = await Balance.query(aMS, Store.platform('moonshot'));
+  ok('余额·Moonshot 读 available_balance', bMS.ok === true && Math.abs(bMS.amount - 49.58894) < 1e-9,
+    { ok: bMS.ok, amount: bMS.amount, msg: bMS.message });
+
+  const aSF = mk('siliconflow', 'http://127.0.0.1:8899/v1');
+  const bSF = await Balance.query(aSF, Store.platform('siliconflow'));
+  ok('余额·硅基流动读 totalBalance', bSF.ok === true && bSF.amount === 88.88,
+    { ok: bSF.ok, amount: bSF.amount, msg: bSF.message });
+
+  const aOR = mk('openrouter', 'http://127.0.0.1:8899/api/v1', 'sk-or-limited');
+  const bOR = await Balance.query(aOR, Store.platform('openrouter'));
+  ok('余额·OpenRouter 限额密钥读 limit_remaining（$12.5）',
+    bOR.ok === true && bOR.amount === 12.5 && bOR.currency === 'USD',
+    { ok: bOR.ok, amount: bOR.amount, cur: bOR.currency, msg: bOR.message });
+
+  const aOR2 = mk('openrouter', 'http://127.0.0.1:8899/api/v1', 'sk-or-unlimited-000');
+  const bOR2 = await Balance.query(aOR2, Store.platform('openrouter'));
+  ok('余额·OpenRouter 充值型密钥自动退回 credits（10 - 0.5 = $9.5）',
+    bOR2.ok === true && Math.abs(bOR2.amount - 9.5) < 1e-9,
+    { ok: bOR2.ok, amount: bOR2.amount, msg: bOR2.message });
+
+  /* --- 19.2 官方接口的失败口径 --- */
+  const aBadKey = mk('deepseek', 'http://127.0.0.1:8899', 'wrong-key');
+  const qBadKey = await Balance.query(aBadKey, Store.platform('deepseek'));
+  ok('余额·官方接口坏密钥归类 auth_invalid 且有可读文案',
+    qBadKey.ok === false && qBadKey.kind === 'auth_invalid' && /密钥/.test(String(qBadKey.message)),
+    { kind: qBadKey.kind, msg: qBadKey.message });
+
+  const aOA = mk('openai', 'https://api.openai.com/v1', 'sk-mock');
+  const qManual = await Balance.query(aOA, Store.platform('openai'));
+  ok('余额·没有公开接口的平台归类 manual', qManual.ok === false && qManual.kind === 'manual', qManual.kind);
+  ok('余额·manual 对外仍映射成 unsupported（老调用方认这个值）',
+    (await Api.balance(aOA, Store.platform('openai'))).kind === 'unsupported', '');
+
+  /* --- 19.3 中转站面板：明文密码 --- */
+  const pPlain = mk('custom', 'http://127.0.0.1:8899', 'sk-mock-1234567890');
+  const q1 = await Balance.query(pPlain, P_CUSTOM, { username: 'demo', password: 'demo123' });
+  ok('余额·面板：账号密码登录成功', q1.ok === true, { ok: q1.ok, kind: q1.kind, msg: q1.message });
+  ok('余额·面板：quota / quota_per_unit 折算出 $50',
+    q1.ok && q1.amount === 50 && q1.currency === 'USD', { amount: q1.amount, cur: q1.currency });
+  ok('余额·面板：拿到了可复用的 access_token', q1.ok && !!q1.token, q1.token);
+
+  const qBadPwd = await Balance.query(pPlain, P_CUSTOM, { username: 'demo', password: 'wrong' });
+  ok('余额·面板：密码错归类 auth_invalid',
+    qBadPwd.ok === false && qBadPwd.kind === 'auth_invalid', { kind: qBadPwd.kind, http: qBadPwd.httpStatus });
+
+  /* --- 19.4 中转站面板：站点开了人机验证（脚本过不去的硬边界） --- */
+  const pTurn = mk('custom', 'http://127.0.0.1:8899/turnstile', 'sk-mock-1234567890');
+  const qTurn = await Balance.query(pTurn, P_CUSTOM, { username: 'demo', password: 'demo123' });
+  ok('余额·面板：人机验证站点被识别并归类 turnstile',
+    qTurn.ok === false && qTurn.kind === 'turnstile', { kind: qTurn.kind, msg: qTurn.message });
+  ok('余额·面板：人机验证的文案给出了替代做法（token / 手动填）',
+    /token/.test(String(qTurn.message)) && /手动填/.test(String(qTurn.message)), qTurn.message);
+
+  /* --- 19.5 中转站面板：站点开启密码加密
+         这一条最有分量 —— mock 用的是真生成的 RSA 私钥，
+         能解开就说明浏览器侧 RSA-OAEP(SHA-256) 的实现是字节级正确的。 --- */
+  const pEnc = mk('custom', 'http://127.0.0.1:8899/enc', 'sk-mock-1234567890');
+  const qEnc = await Balance.query(pEnc, P_CUSTOM, { username: 'demo', password: 'demo123' });
+  ok('余额·面板：RSA-OAEP 加密密码被真私钥解开 → 登录成功', qEnc.ok === true,
+    { ok: qEnc.ok, kind: qEnc.kind, msg: qEnc.message });
+  ok('余额·面板：加密站点同样读到 $50', qEnc.ok && qEnc.amount === 50, qEnc.amount);
+
+  /* --- 19.6 非面板地址 —— 两种情况都要归到 not_panel：
+         ① 官方 API 域名（不带鉴权探测 → 401）
+         ② 地址上确实没有这个路由（404，且 /api/status 本不该要鉴权）
+         两者都不该被误报成 auth_invalid，否则会让人去查根本不存在的账号密码。 --- */
+  const pNotPanel = mk('custom', 'http://127.0.0.1:8899/openai-compat', 'sk-mock-1234567890');
+  const qNotPanel = await Balance.query(pNotPanel, P_CUSTOM, { username: 'demo', password: 'demo123' });
+  ok('余额·面板：官方 API 域名（/api/status 要鉴权 → 401）归类 not_panel',
+    qNotPanel.ok === false && qNotPanel.kind === 'not_panel', { kind: qNotPanel.kind, http: qNotPanel.httpStatus });
+  ok('余额·面板：这条文案解释了「面板的 /api/status 本该公开」而不误导去查密码',
+    /公开/.test(String(qNotPanel.message)), qNotPanel.message);
+
+  const pNoRoute = mk('custom', 'http://127.0.0.1:8899/plain', 'sk-mock-1234567890');
+  const qNoRoute = await Balance.query(pNoRoute, P_CUSTOM, { username: 'demo', password: 'demo123' });
+  ok('余额·面板：地址上真没有 /api/status（404）同样归类 not_panel',
+    qNoRoute.ok === false && qNoRoute.kind === 'not_panel', { kind: qNoRoute.kind, http: qNoRoute.httpStatus });
+
+  /* --- 19.7 结果写回本地：折算、来源标记、凭据留存 --- */
+  const applied = Balance.applyResult(pPlain.id, q1, { username: 'demo', rememberPassword: false });
+  ok('余额·写回：外币按汇率折成本地金额', applied.ok === true && Math.abs(applied.cny - 365) < 0.01, applied);
+  const acctAfter = Store.account(pPlain.id);
+  ok('余额·写回：balance = ¥365.00', Math.abs(acctAfter.balance - 365) < 0.01, acctAfter.balance);
+  ok('余额·写回：来源标记成 panel', acctAfter.balanceSource === 'panel', acctAfter.balanceSource);
+  ok('余额·写回：原始美元金额留档可回溯',
+    !!acctAfter.balanceNative && acctAfter.balanceNative.currency === 'USD' && acctAfter.balanceNative.amount === 50,
+    acctAfter.balanceNative);
+  ok('余额·凭据：登录 token 已落盘', !!(acctAfter.cred && acctAfter.cred.token), acctAfter.cred);
+  ok('余额·凭据：没勾「记住密码」就绝不存密码',
+    acctAfter.cred.password === '' && acctAfter.cred.savePassword === false, acctAfter.cred);
+
+  const q2 = await Balance.query(acctAfter, P_CUSTOM);
+  ok('余额·面板：已有 token 时免登录直接读', q2.ok === true && q2.via === 'token',
+    { ok: q2.ok, via: q2.via, msg: q2.message });
+
+  /* --- 19.8 换算函数 --- */
+  ok('换算：人民币不做折算', toCNY(100, 'CNY', 7.3).cny === 100 && toCNY(100, 'CNY', 7.3).converted === false, '');
+  ok('换算：美元按汇率折算（50 × 7.3 = 365）', Math.abs(toCNY(50, 'USD', 7.3).cny - 365) < 1e-9, toCNY(50, 'USD', 7.3).cny);
+  ok('换算：汇率非法时退回 7.3', toCNY(1, 'USD', 0).cny === 7.3, toCNY(1, 'USD', 0).cny);
+
+  /* --- 19.9 批量刷新 --- */
+  const batch = await Balance.refreshAll([{ account: aDS, platform: Store.platform('deepseek') }]);
+  ok('批量刷新：返回逐账号结果并已落盘',
+    batch.length === 1 && batch[0].result.ok === true && Store.account(aDS.id).balance === 88.6,
+    batch);
+
+  /* --- 19.10 导出不能把面板密码带出去 --- */
+  const dumpSafe = JSON.parse(Store.exportJson());
+  const dSafe = (dumpSafe.accounts || []).filter((x) => x.id === pPlain.id)[0];
+  ok('导出：默认剥掉面板密码', !!dSafe && dSafe.cred && !dSafe.cred.password, dSafe && dSafe.cred);
+  ok('导出：token 也不跟着出去', !!dSafe && !dSafe.cred.token, dSafe && dSafe.cred);
+  const dumpFull = JSON.parse(Store.exportJson({ includeCreds: true }));
+  const dFull = (dumpFull.accounts || []).filter((x) => x.id === pPlain.id)[0];
+  ok('导出：显式勾选「含凭据」时 token 保留', !!dFull && !!dFull.cred.token, dFull && dFull.cred);
+
+  /* --- 19.11 底部提示文案 --- */
+  ok('文案：need_login 指引到「填账号密码」', failInfo('need_login').todo.join(' ').indexOf('账号密码') >= 0, failInfo('need_login').todo);
+  ok('文案：turnstile 明说脚本绕不过去', failInfo('turnstile').todo.join(' ').indexOf('无法绕过') >= 0, failInfo('turnstile').todo);
+  ok('文案：manual 有明确标题', String(failInfo('manual').title).length > 0, failInfo('manual').title);
+
+  /* --- 19.12 界面：账号详情里的余额与面板登录 --- */
+  go('account', pPlain.id);
+  const dv = document.querySelector('#view').textContent;
+  ok('UI：账号详情显示余额来源标签「面板登录」', dv.indexOf('面板登录') >= 0, '');
+  ok('UI：中转站账号出现「中转站面板」区块', dv.indexOf('中转站面板') >= 0, '');
+  ok('UI：详情页有读取余额的按钮', !!document.querySelector('[data-bal]'), '');
+  ok('UI：详情页保留手动填写入口', !!document.querySelector('[data-manual]'), '');
+  ok('UI：详情页显示了折算前的原始美元金额', dv.indexOf('$50') >= 0, '');
+
+  go('account', aOA.id);
+  const dv2 = document.querySelector('#view').textContent;
+  ok('UI：不支持的平台说明「没有开放余额查询接口」', dv2.indexOf('没有开放余额查询接口') >= 0, '');
+
+  /* ===================================================================
+     20. 电脑端布局
+     宽屏是左侧固定导航 + 表格；窄屏靠同一份 DOM 加 CSS 降级成卡片。
+     =================================================================== */
+
+  go('overview');
+  const ovRoot = document.querySelector('#view');
+  ok('布局：外层是 sidebar + stage 两栏骨架',
+    !!document.querySelector('#shell > #sidebar') && !!document.querySelector('#shell > #stage'), '');
+  ok('布局：侧栏导航渲染出 4 项',
+    document.querySelectorAll('#sb-nav .sb-item').length === 4,
+    document.querySelectorAll('#sb-nav .sb-item').length);
+  ok('布局：侧栏当前页高亮',
+    ((document.querySelector('#sb-nav .sb-item.on') || {}).textContent || '').indexOf('总览') >= 0,
+    (document.querySelector('#sb-nav .sb-item.on') || {}).textContent);
+  ok('布局：侧栏底部显示余额合计与网络模式',
+    /余额合计/.test(document.querySelector('#sb-foot').textContent), '');
+  ok('布局：窄屏抽屉的遮罩已就位', !!document.querySelector('#drawer-scrim'), '');
+  ok('布局：窄屏顶部有汉堡按钮', !!document.querySelector('#menu-btn'), '');
+  ok('布局：伪手机状态栏与桌面提示框都已移除',
+    document.querySelectorAll('#desktop-hint, .notchbar').length === 0, '');
+
+  ok('UI：总览用表格呈现账号', !!ovRoot.querySelector('table.tbl'), '');
+  ok('UI：总览表格带表头', ovRoot.querySelectorAll('table.tbl thead th').length >= 5,
+    ovRoot.querySelectorAll('table.tbl thead th').length);
+  ok('UI：总览按平台分组，每组一个表格',
+    ovRoot.querySelectorAll('.card .tbl-wrap').length >= 1, ovRoot.querySelectorAll('.card .tbl-wrap').length);
+  ok('UI：窄屏卡片视图要用的 data-th 标签都写好了',
+    ovRoot.querySelectorAll('table.tbl tbody td[data-th]').length > 0,
+    ovRoot.querySelectorAll('table.tbl tbody td[data-th]').length);
+  ok('UI：总览有四个数字块', ovRoot.querySelectorAll('.stats .stat').length === 4,
+    ovRoot.querySelectorAll('.stats .stat').length);
+  ok('UI：总览有力所能及的「刷新全部余额」入口', !!ovRoot.querySelector('[data-refresh-all]'), '');
+
+  go('logs');
+  const lgRoot = document.querySelector('#view');
+  ok('UI：日志页用表格呈现', !!lgRoot.querySelector('table.tbl'), '');
+  ok('UI：日志表带表头', lgRoot.querySelectorAll('table.tbl thead th').length >= 6,
+    lgRoot.querySelectorAll('table.tbl thead th').length);
+
+  go('settings');
+  const stRoot = document.querySelector('#view');
+  ok('UI：设置页有汇率输入', !!stRoot.querySelector('#f-rate'), '');
+  ok('UI：设置页列出各平台的余额读取能力',
+    /余额读取能力/.test(stRoot.textContent) && stRoot.querySelectorAll('table.tbl tbody tr').length >= 5,
+    stRoot.querySelectorAll('table.tbl tbody tr').length);
+  ok('UI：设置页有两个导出入口（含/不含凭据）',
+    stRoot.querySelectorAll('[data-export]').length === 2, stRoot.querySelectorAll('[data-export]').length);
+
+  /* 样式表里真的写了断点规则，否则「电脑端/手机端」只是嘴上说说 */
+  let cssText = '';
+  try { cssText = await (await fetch('app.css', { cache: 'no-store' })).text(); } catch (_) {}
+  ok('布局：样式表包含 ≥900px 的侧栏固定规则', /min-width:\s*900px/.test(cssText), cssText.length);
+  ok('布局：样式表包含 <900px 的表格降级为卡片规则', /max-width:\s*899px/.test(cssText), '');
+  ok('布局：样式表里窄屏下隐藏了底部 Tab 之外的侧栏',
+    /#sidebar\s*\{[^}]*transform:\s*translateX\(-100%\)/.test(cssText), '');
+
+  /* --- 20.4 窄屏「真实计算值」复核 ---
+     光断言 DOM 里有没有元素是不够的：`#menu-btn` 曾经因为权重被 `.icon-btn`
+     盖住，电脑端一直顶着一个无效汉堡，而 DOM 断言完全看不出来。
+     这里读 getComputedStyle 的真实结果。当前窗口就是窄屏。 --- */
+  function disp(sel) {
+    const el = document.querySelector(sel);
+    return el ? getComputedStyle(el).display : '(不存在)';
+  }
+  const narrow = window.matchMedia('(max-width: 899px)').matches;
+
+  if (narrow) {
+    go('overview');
+    ok('窄屏计算值：顶栏汉堡按钮是显示的', disp('#menu-btn') !== 'none', disp('#menu-btn'));
+    ok('窄屏计算值：底部 Tab 是显示的', disp('#tabbar') !== 'none', disp('#tabbar'));
+    ok('窄屏计算值：侧栏默认被推到屏幕外', disp('#sidebar') !== 'none', disp('#sidebar'));
+    ok('窄屏计算值：侧栏 transform 把它移出视口',
+      /matrix\(1,\s*0,\s*0,\s*1,\s*-|translateX\(-/.test(getComputedStyle(document.querySelector('#sidebar')).transform) ||
+      document.querySelector('#sidebar').getBoundingClientRect().right <= 1,
+      getComputedStyle(document.querySelector('#sidebar')).transform);
+    ok('窄屏计算值：表格被降级成卡片（table 变成 block）',
+      getComputedStyle(document.querySelector('table.tbl')).display === 'block',
+      getComputedStyle(document.querySelector('table.tbl')).display);
+    const firstLabel = document.querySelector('table.tbl tbody td[data-th]');
+    ok('窄屏计算值：卡片视图把表头借 ::before 显示出来了',
+      firstLabel && /attr\(data-th\)/.test(cssText), firstLabel ? firstLabel.getAttribute('data-th') : '');
+  } else {
+    ok('窄屏计算值：当前视口不是窄屏，跳过（由 e2e-desktop 复核电脑端）', true, window.innerWidth);
+  }
+
   R.pass = R.steps.filter((s) => s.pass).length;
   R.total = R.steps.length;
   return R;

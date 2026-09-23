@@ -99,36 +99,64 @@ async function jsonOf(url) {
     await sleep(200);
   }
 
-  const src = fs.readFileSync(path.join(__dirname, 'e2e-page.js'), 'utf8');
-  const r = await cmd('Runtime.evaluate', {
-    expression: src,
-    awaitPromise: true,
-    returnByValue: true,
-    userGesture: true,
-  });
+  async function runSuite(file) {
+    const src = fs.readFileSync(path.join(__dirname, file), 'utf8');
+    const r = await cmd('Runtime.evaluate', {
+      expression: src,
+      awaitPromise: true,
+      returnByValue: true,
+      userGesture: true,
+    });
+    if (r.exceptionDetails) {
+      const ex = r.exceptionDetails;
+      return { pass: 0, total: 0, steps: [], fatal: file + ' → ' + ((ex.exception && ex.exception.description) || ex.text) };
+    }
+    return r.result.value;
+  }
 
-  let out;
-  if (r.exceptionDetails) {
-    const ex = r.exceptionDetails;
-    out = { pass: 0, total: 0, steps: [], fatal: (ex.exception && ex.exception.description) || ex.text };
-  } else {
-    out = r.result.value;
+  const out = await runSuite('e2e-page.js');
+
+  /* 主套件跑在窄屏默认窗口里，只覆盖到 <900px 那一支。
+     再切一次视口，把电脑端的真实计算值单独复核一遍。
+     （两边用的是同一套计算样式检查 —— 电脑端那个「汉堡按钮盖不掉」的 bug
+       就是 DOM 断言看不见、只有计算值才看得见的典型。） */
+  let desktop = { pass: 0, total: 0, steps: [] };
+  if (!out.fatal) {
+    await cmd('Emulation.setDeviceMetricsOverride', {
+      width: 1440, height: 900, deviceScaleFactor: 1, mobile: false,
+    });
+    await sleep(420);
+    desktop = await runSuite('e2e-desktop.js');
+    await cmd('Emulation.clearDeviceMetricsOverride');
+  }
+
+  let result = out;
+  if (!out.fatal) {
+    if (desktop.fatal) {
+      result = desktop;
+    } else {
+      result = {
+        pass: out.pass + desktop.pass,
+        total: out.total + desktop.total,
+        steps: (out.steps || []).concat(desktop.steps || []),
+      };
+    }
   }
 
   ws.close();
   cleanup();
 
-  if (out.fatal) {
+  if (result.fatal) {
     console.log('FATAL 页面执行异常：');
-    console.log(out.fatal);
+    console.log(result.fatal);
     process.exit(1);
   }
 
   console.log('');
-  (out.steps || []).forEach((s) => {
+  (result.steps || []).forEach((s) => {
     console.log((s.pass ? '  OK  ' : '  **  ') + pad(s.name, 46) + (s.pass ? '' : '   got=' + JSON.stringify(s.got)));
   });
   console.log('');
-  console.log('结果：' + out.pass + ' / ' + out.total + ' 通过');
-  process.exit(out.pass === out.total ? 0 : 1);
+  console.log('结果：' + result.pass + ' / ' + result.total + ' 通过');
+  process.exit(result.pass === result.total ? 0 : 1);
 })();

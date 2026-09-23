@@ -22,10 +22,34 @@ function platformColor(id) {
   return p ? (p.color || '#6BA8A0') : '#6BA8A0';
 }
 
+/** 失败原因的短标签 —— 日志表格里只有一格，写不下整句话 */
+const STATUS_SHORT = {
+  auth_invalid: '鉴权失败',
+  auth_forbidden: '无权限',
+  not_found: '404',
+  rate_limited: '限流',
+  timeout: '超时',
+  network: '网络不通',
+  cors: '跨域拦截',
+  upstream_error: '上游异常',
+  bad_request: '参数被拒',
+  parse: '格式认不出',
+  unsupported: '不支持',
+  crypto: '加密失败',
+  token_expired: '登录过期',
+  turnstile: '人机验证',
+};
+
 function statusTagOf(log) {
   if (!log) return '<span class="tag mute">未验证</span>';
   if (log.status === 'ok') return '<span class="tag ok">' + esc(String(log.code || 200)) + ' OK</span>';
-  return '<span class="tag err">' + esc(log.kind === 'timeout' ? '超时' : (log.code || '失败')) + '</span>';
+  const label = STATUS_SHORT[log.kind] || (log.code ? String(log.code) : '失败');
+  return '<span class="tag err">' + esc(label) + '</span>';
+}
+
+/** 这条日志是「接口验证」还是「对话」产生的。老记录没有 trigger 字段，用 kind 兜底 */
+function triggerLabel(l) {
+  return (l && (l.trigger === 'verify' || l.kind === 'verify')) ? '接口验证' : '对话';
 }
 
 function emptyBlock(icon, title, sub, actionHtml) {
@@ -33,6 +57,44 @@ function emptyBlock(icon, title, sub, actionHtml) {
     '<div class="em-title">' + esc(title) + '</div>' +
     '<div class="em-sub">' + (sub || '') + '</div>' +
     (actionHtml || '') + '</div>';
+}
+
+/** 余额来源的短标签，表格里放得下 */
+const BALANCE_SOURCE_SHORT = {
+  deepseek: 'DeepSeek 接口',
+  moonshot: 'Moonshot 接口',
+  siliconflow: '硅基流动接口',
+  openrouter: 'OpenRouter 接口',
+  panel: '面板登录',
+  manual: '手动填写',
+};
+
+function balanceSourceTag(a) {
+  const src = a.balanceSource;
+  if (!src) {
+    return typeof a.balance === 'number'
+      ? '<span class="tag line">来源未知</span>'
+      : '<span class="tag mute">未读取</span>';
+  }
+  const label = BALANCE_SOURCE_SHORT[src] || esc(src);
+  return src === 'manual'
+    ? '<span class="tag line">' + esc(label) + '</span>'
+    : '<span class="tag ok">' + esc(label) + '</span>';
+}
+
+/** 表格里的余额单元格：主数字 + 折算前的原始金额 */
+function balanceCell(a) {
+  if (typeof a.balance !== 'number') {
+    return '<span class="t-md c-4">—</span>';
+  }
+  const low = a.balance < 10;
+  let html = '<span class="strong' + (low ? ' c-rose' : '') + '">¥' + a.balance.toFixed(2) + '</span>';
+  if (a.balanceNative && a.balanceNative.amount != null) {
+    const sym = String(a.balanceNative.currency).toUpperCase() === 'USD' ? '$' : '';
+    html += '<div class="sub">原始 ' + sym + a.balanceNative.amount +
+      ' · 按 ¥' + (Store.settings().usdRate || 7.3) + '/$ 折算</div>';
+  }
+  return html;
 }
 
 /* ------------------------------------------------------------ 总览 */
@@ -62,112 +124,305 @@ Screens.overview = function (root) {
     return;
   }
 
-  /* 汇总：可查余额的按数值求和，不可查的单独提示 */
-  let sum = 0, cnt = 0, auto = 0;
+  /* 汇总 */
+  let sum = 0, withBal = 0, autoable = 0, missing = 0, lowCount = 0;
   accounts.forEach((a) => {
-    if (typeof a.balance === 'number') { sum += a.balance; cnt++; }
-    if (!a.balanceManual && Store.platform(a.platformId) && Store.platform(a.platformId).balance === 'auto') auto++;
+    const p = Store.platform(a.platformId);
+    if (typeof a.balance === 'number') { sum += a.balance; withBal++; }
+    else missing++;
+    if (typeof a.balance === 'number' && a.balance < 10) lowCount++;
+    if (canAutoBalance(p)) autoable++;
   });
-  const lowCount = accounts.filter((a) => typeof a.balance === 'number' && a.balance < 10).length;
-
-  /* 备注：默认展开第一个平台 */
-  const expanded = Screens.overview._expanded || (Screens.overview._expanded = {});
-
-  const withBalanceNum = plats.filter((p) => Store.accountsOf(p.id).some((a) => typeof a.balance === 'number')).length;
 
   let html = '';
 
-  html += '<div class="strip"><div class="stack gap-4">' +
-    '<span class="s-lab">' + cnt + ' 个账号已填余额' + (withBalanceNum < plats.length ? ' · ' + (plats.length - withBalanceNum) + ' 个平台待补' : '') + '</span>' +
-    '<span class="s-val">¥' + (sum || 0).toFixed(2) + '</span>' +
-    '</div>' +
-    '<div class="stack gap-4" style="text-align:right">' +
-    '<span class="s-lab">账号 / 平台</span>' +
-    '<span class="mono w-500" style="font-size:13px">' + accounts.length + ' / ' + plats.length + '</span>' +
-    '</div></div>';
+  /* ---------- 四个数字块 ---------- */
+  html += '<div class="stats">' +
+    '<div class="stat accent"><span class="st-lab">余额合计</span>' +
+      '<span class="st-val">¥' + sum.toFixed(2) + '</span>' +
+      '<span class="st-sub">' + withBal + ' / ' + accounts.length + ' 个账号有余额</span></div>' +
+    '<div class="stat"><span class="st-lab">账号 / 平台</span>' +
+      '<span class="st-val">' + accounts.length + ' / ' + plats.length + '</span>' +
+      '<span class="st-sub">' + (missing ? missing + ' 个账号还没读到余额' : '余额都齐了') + '</span></div>' +
+    '<div class="stat"><span class="st-lab">支持自动读取</span>' +
+      '<span class="st-val">' + autoable + '</span>' +
+      '<span class="st-sub">官方接口 + 中转站面板</span></div>' +
+    '<div class="stat"><span class="st-lab">余额偏低</span>' +
+      '<span class="st-val"' + (lowCount ? ' style="color:var(--rose-d)"' : '') + '>' + lowCount + '</span>' +
+      '<span class="st-sub">低于 ¥10 的账号</span></div>' +
+    '</div>';
 
-  /* 筛选 chips */
+  /* ---------- 操作条 ---------- */
   const filters = [
     { key: 'all', label: '全部 ' + accounts.length },
     { key: 'low', label: '余额偏低 ' + lowCount },
-    { key: 'auto', label: '可自动查余额 ' + auto },
+    { key: 'auto', label: '可自动读取 ' + autoable },
+    { key: 'missing', label: '待读取 ' + missing },
   ];
-  html += '<div class="chips" style="margin-top:12px">' + filters.map((f) =>
-    '<button class="chip' + (OverviewFilter.key === f.key ? ' on' : '') + '" data-filter="' + f.key + '">' + esc(f.label) + '</button>'
-  ).join('') + '</div>';
+  html += '<div class="row between" style="margin-top:16px;gap:14px;flex-wrap:wrap">' +
+    '<div class="chips">' + filters.map((f) =>
+      '<button class="chip' + (OverviewFilter.key === f.key ? ' on' : '') + '" data-filter="' + f.key + '">' + esc(f.label) + '</button>'
+    ).join('') + '</div>' +
+    '<button class="btn ghost sm" data-refresh-all>刷新全部余额</button></div>';
 
-  /* 平台卡 */
+  /* ---------- 平台分组 ---------- */
+  const expanded = Screens.overview._expanded || (Screens.overview._expanded = {});
+
   const visiblePlats = plats.filter((p) => {
     const list = Store.accountsOf(p.id);
-    if (OverviewFilter.key === 'low')  return list.some((a) => typeof a.balance === 'number' && a.balance < 10);
-    if (OverviewFilter.key === 'auto') return p.balance === 'auto';
+    if (OverviewFilter.key === 'low') return list.some((a) => typeof a.balance === 'number' && a.balance < 10);
+    if (OverviewFilter.key === 'auto') return canAutoBalance(p);
+    if (OverviewFilter.key === 'missing') return list.some((a) => typeof a.balance !== 'number');
     return true;
   });
 
-  html += '<div class="stack gap-10" style="margin-top:14px">';
+  html += '<div class="stack gap-12" style="margin-top:16px">';
 
   if (!visiblePlats.length) {
-    html += '<div class="section-title" style="padding:18px 0;text-align:center">当前筛选下没有平台</div>';
+    html += '<div class="section-title" style="padding:22px 0;text-align:center">当前筛选下没有平台</div>';
   }
 
   visiblePlats.forEach((p) => {
     const list = Store.accountsOf(p.id);
     const numList = list.filter((a) => typeof a.balance === 'number');
     const total = numList.reduce((s, a) => s + a.balance, 0);
-    const isOpen = !!expanded[p.id];
+    /* 默认全部展开：表格本来就是为了「一眼看完」，没必要让用户逐个点开 */
+    const isOpen = expanded[p.id] !== false;
     const low = numList.filter((a) => a.balance < 10).length;
 
-    let sub = list.length + ' 个账号';
-    if (numList.length === list.length) sub += ' · 余额已补齐';
-    else if (numList.length) sub += ' · ' + (list.length - numList.length) + ' 个待补余额';
-    else sub += ' · 余额待补';
+    let sub = list.length + ' 个账号 · ' + (BALANCE_KIND_LABEL[balanceKindOf(p)] || '');
+    if (numList.length < list.length) sub += ' · ' + (list.length - numList.length) + ' 个待读取';
     if (low) sub += ' · ' + low + ' 个偏低';
 
-    html += '<div class="card" data-platwrap="' + esc(p.id) + '">';
-    html += '<button class="pf-head" data-toggle="' + esc(p.id) + '">' + platformLogo(p) +
-      '<span class="stack gap-4 grow" style="align-items:flex-start">' +
+    html += '<div class="card" style="padding:0;overflow:hidden">';
+
+    html += '<button class="pf-head" data-toggle="' + esc(p.id) + '" style="padding:14px 16px">' +
+      platformLogo(p) +
+      '<span class="stack gap-4 grow self-start">' +
         '<span class="t-md w-500">' + esc(p.name) + '</span>' +
         '<span class="t-xs ' + (low ? 'c-rose' : 'c-3') + '">' + esc(sub) + '</span>' +
       '</span>' +
       '<span class="stack gap-4" style="align-items:flex-end">' +
         '<span class="mono t-md w-600">' + (numList.length ? '¥' + total.toFixed(2) : '—') + '</span>' +
-        '<span class="t-xs c-3">' + (isOpen ? '收起 ⌃' : '展开 ⌄') + '</span>' +
+        '<span class="t-xs c-3">' + (isOpen ? '收起' : '展开') + '</span>' +
       '</span></button>';
 
     if (isOpen) {
-      html += '<div class="pf-body">' + list.map((a) => {
-        const amt = typeof a.balance === 'number'
-          ? '<span class="a-amt ' + (a.balance < 10 ? 'c-rose' : '') + '">¥' + a.balance.toFixed(2) + '</span>'
-          : '<span class="a-amt c-4">未填</span>';
-        return '<button class="acct-row" data-acct="' + esc(a.id) + '" style="width:100%;text-align:left">' +
-          '<span class="dot ' + (typeof a.balance === 'number' && a.balance < 10 ? 'err' : 'ok') + '"></span>' +
-          '<span class="stack gap-4 grow" style="align-items:flex-start">' +
-            '<span class="t-md w-500">' + esc(a.label) + '</span>' +
-            '<span class="t-xs c-3 mono ellipsis" style="max-width:150px">' + esc(maskKey(a.apiKey)) + '</span>' +
-          '</span>' + amt + '<span class="c-3" style="margin-left:6px">›</span></button>';
-      }).join('') +
-      '<button class="btn soft sm" style="width:100%;margin-top:10px" data-addto="' + esc(p.id) + '">+ 给 ' + esc(p.name) + ' 加账号</button>' +
-      '</div>';
+      html += '<div style="border-top:1px solid var(--line-soft)">' +
+        '<div class="tbl-wrap" style="box-shadow:none;border-radius:0">' +
+        '<table class="tbl"><thead><tr>' +
+          '<th>账号</th><th>密钥</th><th>余额</th><th>读取方式</th><th>更新时间</th><th class="right">操作</th>' +
+        '</tr></thead><tbody>';
+
+      list.forEach((a) => {
+        const src = a.balanceSource;
+        const canRefresh = canAutoBalance(p);
+        html += '<tr class="rowbtn" data-acct="' + esc(a.id) + '">' +
+          '<td class="main-cell"><span class="t-md w-500">' + esc(a.label) + '</span>' +
+            (a.defaultModel ? '<div class="sub mono">默认 ' + esc(a.defaultModel) + '</div>' : '') + '</td>' +
+          '<td class="mono t-sm c-3 nowrap" data-th="密钥">' + esc(maskKey(a.apiKey)) + '</td>' +
+          '<td data-th="余额">' + balanceCell(a) + '</td>' +
+          '<td data-th="读取方式">' + balanceSourceTag(a) + '</td>' +
+          '<td class="t-sm c-3 nowrap" data-th="更新时间">' + (a.balanceUpdatedAt ? esc(relTime(a.balanceUpdatedAt)) : '—') + '</td>' +
+          '<td class="right nowrap" data-th="操作">' +
+            (canRefresh
+              ? '<button class="btn soft sm" data-bal-one="' + esc(a.id) + '">' +
+                (src === 'panel' || balanceKindOf(p) === 'panel' ? '读余额' : '刷新') + '</button>'
+              : '<button class="btn ghost sm" data-manual="' + esc(a.id) + '">填余额</button>') +
+          '</td></tr>';
+      });
+
+      html += '</tbody></table></div>' +
+        '<div class="tbl-foot">' +
+        '<button class="t-sm c-brand" data-addto="' + esc(p.id) + '">+ 给 ' + esc(p.name) + ' 加一个账号</button>' +
+        '</div></div>';
     }
+
     html += '</div>';
   });
 
   html += '</div>';
   root.innerHTML = html;
 
-  /* 事件 */
+  /* ---------- 事件 ---------- */
   $$('[data-filter]', root).forEach((b) => b.addEventListener('click', () => {
     OverviewFilter.key = b.getAttribute('data-filter');
     render();
   }));
   $$('[data-toggle]', root).forEach((b) => b.addEventListener('click', () => {
     const id = b.getAttribute('data-toggle');
-    expanded[id] = !expanded[id];
+    expanded[id] = expanded[id] === false;
     render();
   }));
-  $$('[data-acct]', root).forEach((b) => b.addEventListener('click', () => go('account', b.getAttribute('data-acct'))));
+  $$('[data-acct]', root).forEach((tr) => tr.addEventListener('click', (e) => {
+    if (e.target.closest('button')) return;
+    go('account', tr.getAttribute('data-acct'));
+  }));
   $$('[data-addto]', root).forEach((b) => b.addEventListener('click', () => go('add', b.getAttribute('data-addto'))));
+  $$('[data-bal-one]', root).forEach((b) => b.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    await refreshOneBalance(b.getAttribute('data-bal-one'), b);
+  }));
+  $$('[data-manual]', root).forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const a = Store.account(b.getAttribute('data-manual'));
+    if (a) manualBalanceSheet(a, Store.platform(a.platformId));
+  }));
+  const rall = root.querySelector('[data-refresh-all]');
+  if (rall) rall.addEventListener('click', refreshAllBalances);
 };
+
+/**
+ * 刷新单个账号余额。
+ * 中转站面板第一次需要账号密码 —— 这里直接把登录框弹出来，不让用户自己去翻页面。
+ */
+async function refreshOneBalance(accountId, btn) {
+  const a = Store.account(accountId);
+  if (!a) return;
+  const p = Store.platform(a.platformId);
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.textContent = '读取中…'; btn.disabled = true; }
+
+  let r = await Balance.query(a, p);
+  if (!r.ok && r.kind === 'need_login') {
+    if (btn) { btn.textContent = old; btn.disabled = false; }
+    panelLoginSheet(a, p);
+    return;
+  }
+  const applied = Balance.applyResult(a.id, r);
+  if (btn) { btn.textContent = old; btn.disabled = false; }
+
+  if (applied.ok) {
+    UI.toast('余额已更新：' + (applied.native ? (applied.native.currency === 'USD' ? '$' : '') + applied.native.amount + ' ≈ ' : '') + '¥' + Number(applied.cny).toFixed(2), 'ok');
+    render();
+  } else {
+    const info = failInfo(applied.kind);
+    UI.toast(info.title + '：' + (applied.message || info.msg), 'err');
+    render();
+  }
+}
+
+/** 手动填余额的弹层（官方接口读不到、人机验证挡住时的兜底） */
+function manualBalanceSheet(a, p) {
+  const cur = typeof a.balance === 'number' ? a.balance : '';
+  UI.openSheet({
+    title: '手动填写余额',
+    html:
+      '<div class="field"><label>当前可用余额（元）</label>' +
+      '<input class="input mono" id="bval" type="number" step="0.01" placeholder="例如 52.40" value="' + cur + '"></div>' +
+      '<div class="hint" style="margin-top:10px">该数字只存在本机，用于总览汇总与「余额偏低」提醒。' +
+      (p && balanceKindOf(p) === 'manual' ? '「' + esc(p.name) + '」没有公开的余额接口，只能这样维护。' : '') + '</div>' +
+      '<div class="btn-row" style="margin-top:16px"><button class="btn ghost" data-close>取消</button>' +
+      '<button class="btn primary" data-save>保存</button></div>',
+    onMount(sheet) {
+      sheet.querySelector('[data-save]').addEventListener('click', () => {
+        const v = parseFloat(sheet.querySelector('#bval').value);
+        if (isNaN(v)) { UI.toast('请输入数字', 'err'); return; }
+        Store.updateAccount(a.id, {
+          balance: v, balanceSource: 'manual', balanceNative: null, balanceUpdatedAt: Date.now(),
+        });
+        UI.closeSheet(); UI.toast('已保存', 'ok'); render();
+      });
+    },
+  });
+}
+
+/**
+ * 中转站面板登录。
+ * 两个必须让用户看见的前提：
+ *   1) 密码默认不保存 —— 只留登录换来的 token；
+ *   2) 站点开了人机验证就登录不了，得给一条别的路（手动填 / 粘 token）。
+ */
+function panelLoginSheet(a, p) {
+  const cred = normalizeCred(a.cred) || {};
+  const kind = balanceKindOf(p);
+  const isPanel = kind === 'panel';
+
+  UI.openSheet({
+    title: isPanel ? '登录中转站面板' : '读取余额',
+    html:
+      (isPanel
+        ? '<div class="t-sm c-2" style="line-height:1.8;padding:2px 0 14px">' +
+          '「' + esc(p ? p.name : '该平台') + '」是 New API / One API 系的中转站，余额只能登录面板读。' +
+          '<br>登录成功后 <b>只会保留登录凭据</b>，密码默认不落盘。</div>'
+        : '<div class="t-sm c-2" style="line-height:1.8;padding:2px 0 14px">' +
+          '这个平台用 API Key 就能读余额，不需要账号密码。点下面的按钮直接读。</div>') +
+
+      (isPanel
+        ? '<div class="stack gap-12">' +
+          '<div class="field"><label>站点登录账号</label>' +
+          '<input class="input" id="p-user" autocomplete="off" spellcheck="false" placeholder="用户名或邮箱" value="' + esc(cred.username || '') + '"></div>' +
+          '<div class="field"><label>站点登录密码</label>' +
+          '<input class="input" id="p-pass" type="password" autocomplete="off" placeholder="只在本次登录时使用" value="' + esc(cred.password || '') + '"></div>' +
+          '<label class="check"><input type="checkbox" id="p-remember"' + (cred.savePassword ? ' checked' : '') + '>' +
+          '<span class="ck-body"><span class="ck-title">在本机记住密码</span>' +
+          '<span class="hint">勾上以后可以一键刷新余额。密码会明文存在浏览器本地存储里 —— 共用电脑时别勾。</span></span></label>' +
+          '<div class="field"><label>或者：直接粘贴站点 access token（可选）</label>' +
+          '<input class="input mono" id="p-token" autocomplete="off" spellcheck="false" placeholder="浏览器 F12 → Application → localStorage 里的 token" value="' + esc(cred.token || '') + '"></div>' +
+          '</div>'
+        : '') +
+
+      '<div class="btn-row" style="margin-top:16px">' +
+      '<button class="btn ghost" data-close>取消</button>' +
+      '<button class="btn primary" data-go>' + (isPanel ? '登录并读取' : '读取余额') + '</button></div>' +
+      (isPanel ? '<div style="margin-top:12px;text-align:center">' +
+        '<button class="t-sm c-brand" data-manual>读不到？直接手动填一个余额</button></div>' : ''),
+
+    onMount(sheet) {
+      const goBtn = sheet.querySelector('[data-go]');
+      const mBtn = sheet.querySelector('[data-manual]');
+      if (mBtn) mBtn.addEventListener('click', () => { UI.closeSheet(); manualBalanceSheet(a, p); });
+
+      goBtn.addEventListener('click', async () => {
+        const user = sheet.querySelector('#p-user') ? sheet.querySelector('#p-user').value.trim() : '';
+        const pass = sheet.querySelector('#p-pass') ? sheet.querySelector('#p-pass').value : '';
+        const remember = sheet.querySelector('#p-remember') ? sheet.querySelector('#p-remember').checked : false;
+        const pastedToken = sheet.querySelector('#p-token') ? sheet.querySelector('#p-token').value.trim() : '';
+
+        if (isPanel && pastedToken) {
+          Store.setCred(a.id, { token: pastedToken, tokenAt: Date.now() });
+        } else if (isPanel && (!user || !pass)) {
+          UI.toast('请填写站点的登录账号和密码', 'err');
+          return;
+        }
+
+        goBtn.textContent = '读取中…';
+        goBtn.disabled = true;
+        const r = await Balance.query(Store.account(a.id), p, {
+          username: user, password: pass, rememberPassword: remember,
+        });
+        const applied = Balance.applyResult(a.id, r);
+
+        if (applied.ok) {
+          UI.closeSheet();
+          UI.toast('余额已读取：' + (applied.native ? (applied.native.currency === 'USD' ? '$' : '') + applied.native.amount + ' ≈ ' : '') + '¥' + Number(applied.cny).toFixed(2), 'ok');
+          render();
+          return;
+        }
+
+        goBtn.textContent = isPanel ? '登录并读取' : '读取余额';
+        goBtn.disabled = false;
+        const info = failInfo(applied.kind);
+        UI.openSheet({
+          title: info.title,
+          html: '<div class="t-sm c-2" style="line-height:1.8">' + esc(applied.message || info.msg) + '</div>' +
+            (info.todo && info.todo.length
+              ? '<div class="stack gap-8" style="margin-top:14px">' + info.todo.map((t, i) =>
+                  '<div class="t-sm" style="line-height:1.6"><span class="c-3 mono">' + (i + 1) + '</span>&nbsp;&nbsp;' + esc(t) + '</div>').join('') + '</div>'
+              : '') +
+            '<div class="btn-row" style="margin-top:16px"><button class="btn ghost" data-close>知道了</button>' +
+            '<button class="btn primary" data-manual>手动填余额</button></div>',
+          onMount(s2) {
+            s2.querySelector('[data-manual]').addEventListener('click', () => {
+              UI.closeSheet(); manualBalanceSheet(a, p);
+            });
+          },
+        });
+      });
+    },
+  });
+}
+
 
 /* ------------------------------------------------------------ 接口验证 */
 
@@ -523,31 +778,37 @@ Screens.logs = function (root) {
     '<button class="t-sm c-brand" data-sort>' + (Screens.logs._byCost ? '按时间排序' : '按费用排序') + '</button></div>';
 
   const sorted = list.slice().sort((a, b) => Screens.logs._byCost ? ((b.costCNY || 0) - (a.costCNY || 0)) : (b.ts - a.ts));
+  const shown = sorted.slice(0, 120);
 
-  html += '<div class="list-card">' + sorted.slice(0, 60).map((l) => {
+  html += '<div class="tbl-wrap"><table class="tbl wide"><thead><tr>' +
+    '<th>时间</th><th>模型</th><th>平台 / 账号</th><th>状态</th>' +
+    '<th class="num">入 / 出 tokens</th><th class="num">耗时</th><th class="num">费用</th>' +
+    '</tr></thead><tbody>';
+
+  shown.forEach((l) => {
     const ok = l.status === 'ok';
     const tokTxt = (l.inTok == null && l.outTok == null)
       ? (ok ? '未返回 usage' : '未计费')
-      : '入' + num(l.inTok) + '/出' + num(l.outTok);
+      : num(l.inTok) + ' / ' + num(l.outTok) + (l.tokEstimated ? '（估）' : '');
     const costTxt = typeof l.costCNY === 'number' ? money(l.costCNY) : '—';
-    const kindTag = l.kind === 'verify' ? '验证' : '对话';
-    return '<button class="lrow" style="width:100%;text-align:left" data-log="' + esc(l.id) + '">' +
-      '<span class="dot ' + (ok ? 'ok' : 'err') + '"></span>' +
-      '<span class="l-main">' +
-        '<span class="l-title"><span class="mono">' + esc(l.model || '未知模型') + '</span>' +
-          '<span class="tag mute" style="padding:1px 6px">' + esc(kindTag) + '</span>' +
-          '<span class="grow"></span>' +
-          '<span class="mono ' + (ok ? '' : 'c-4') + '">' + esc(costTxt) + '</span>' +
-        '</span>' +
-        '<span class="l-sub row between">' +
-          '<span class="ellipsis">' + esc(relTime(l.ts)) + ' · ' + esc(platformName(l.platformId)) + '</span>' +
-          '<span class="mono" style="flex:0 0 auto;margin-left:8px">' + esc(tokTxt) + ' · ' + (l.latencyMs / 1000).toFixed(1) + 's</span>' +
-        '</span>' +
-      '</span></button>';
-  }).join('') + '</div>';
+    const acct = Store.account(l.accountId);
+    html += '<tr class="rowbtn" data-log="' + esc(l.id) + '">' +
+      '<td class="t-sm c-3 nowrap">' + esc(relTime(l.ts)) + '</td>' +
+      '<td class="main-cell"><span class="mono t-sm">' + esc(l.model || '未知模型') + '</span>' +
+        '<div class="sub">' + esc(triggerLabel(l)) + (l.streamed ? ' · 流式' : '') + '</div></td>' +
+      '<td class="t-sm" data-th="来源">' + esc(platformName(l.platformId)) +
+        '<div class="sub">' + esc(acct ? acct.label : '账号已删除') + '</div></td>' +
+      '<td data-th="状态">' + statusTagOf(l) + '</td>' +
+      '<td class="num" data-th="入 / 出 tokens">' + esc(tokTxt) + '</td>' +
+      '<td class="num" data-th="耗时">' + (l.latencyMs / 1000).toFixed(1) + 's</td>' +
+      '<td class="num" data-th="费用">' + esc(costTxt) + '</td>' +
+      '</tr>';
+  });
 
-  if (sorted.length > 60) {
-    html += '<div class="t-xs c-3" style="text-align:center;margin-top:12px">仅显示最近 60 条，共 ' + sorted.length + ' 条</div>';
+  html += '</tbody></table></div>';
+
+  if (sorted.length > shown.length) {
+    html += '<div class="t-xs c-3" style="text-align:center;margin-top:12px">仅显示最近 ' + shown.length + ' 条，共 ' + sorted.length + ' 条</div>';
   }
   html += '<div class="t-xs c-4" style="text-align:center;margin-top:14px;line-height:1.7">入 / 出 = 输入与输出 token · 费用按内置参考单价估算，与平台账单可能有出入</div>';
 
@@ -559,7 +820,7 @@ Screens.logs = function (root) {
   root.querySelector('[data-sort]').addEventListener('click', () => {
     Screens.logs._byCost = !Screens.logs._byCost; render();
   });
-  $$('[data-log]', root).forEach((b) => b.addEventListener('click', () => logDetail(b.getAttribute('data-log'))));
+  $$('[data-log]', root).forEach((tr) => tr.addEventListener('click', () => logDetail(tr.getAttribute('data-log'))));
 };
 
 function metric(val, label) {
@@ -576,7 +837,7 @@ function logDetail(id) {
     ['时间', new Date(l.ts).toLocaleString('zh-CN')],
     ['平台 / 账号', platformName(l.platformId) + ' · ' + ((Store.account(l.accountId) || {}).label || '已删除')],
     ['模型', l.model || '—'],
-    ['触发方式', l.kind === 'verify' ? '接口验证' : '对话'],
+    ['触发方式', triggerLabel(l)],
     ['结果', l.status === 'ok' ? '成功' : (info.title + '（' + (l.code || l.kind) + '）')],
     ['耗时', (l.latencyMs / 1000).toFixed(2) + 's'],
     ['输入 tokens', l.inTok == null ? '未返回' : num(l.inTok)],
@@ -607,7 +868,10 @@ function logDetail(id) {
 Screens.account = function (root, ctx) {
   const a = Store.account(ctx.param);
   if (!a) { root.innerHTML = emptyBlock('', '账号已不存在', ''); return; }
-  const p = Store.platform(a.platformId) || { name: '未知', color: '#6BA8A0', balance: 'manual' };
+  const p = Store.platform(a.platformId) || { id: 'custom', name: '未知', color: '#6BA8A0', balanceKind: 'panel' };
+  const kind = balanceKindOf(p);
+  const isPanel = kind === 'panel';
+  const cred = normalizeCred(a.cred) || {};
   const logs = Store.logs().filter((l) => l.accountId === a.id);
   const okCnt = logs.filter((l) => l.status === 'ok').length;
   const cost = logs.reduce((s, l) => s + (l.costCNY || 0), 0);
@@ -615,30 +879,63 @@ Screens.account = function (root, ctx) {
 
   const showKey = !!Screens.account._showKey;
 
-  let html = '';
+  /* ---------- 左栏：余额 ---------- */
+  let left = '';
 
-  /* 余额卡 */
-  html += '<div class="card">' +
-    '<div class="row between">' +
-      '<span class="stack gap-4" style="align-items:flex-start">' +
-        '<span class="t-xs c-3">当前余额' + (a.balanceManual ? '（手动填写）' : '') + '</span>' +
-        '<span class="mono" style="font-size:22px;font-weight:600;letter-spacing:-.5px">' +
-          (typeof a.balance === 'number' ? '¥' + a.balance.toFixed(2) : '未填写') + '</span>' +
+  const native = a.balanceNative;
+  left += '<div class="card">' +
+    '<div class="row between self-start">' +
+      '<span class="stack gap-6 self-start">' +
+        '<span class="t-xs c-3">当前余额</span>' +
+        '<span class="mono" style="font-size:30px;font-weight:600;letter-spacing:-.8px">' +
+          (typeof a.balance === 'number' ? '¥' + a.balance.toFixed(2) : '未读取') + '</span>' +
+        '<span>' + balanceSourceTag(a) + '</span>' +
       '</span>' +
-      '<button class="btn ghost sm" data-bal>' + (p.balance === 'auto' ? '自动查询' : '手动填写') + '</button>' +
+      '<span class="stack gap-8 self-start" style="align-items:flex-end">' +
+        '<button class="btn primary sm" data-bal>' + (isPanel ? '登录并读余额' : '读取余额') + '</button>' +
+        '<button class="btn ghost sm" data-manual>手动填写</button>' +
+      '</span>' +
     '</div>' +
-    (a.balanceUpdatedAt ? '<div class="t-xs c-4" style="margin-top:10px">更新于 ' + esc(relTime(a.balanceUpdatedAt)) + '</div>' : '') +
+    (native
+      ? '<div class="t-xs c-3" style="margin-top:12px">接口原始值 ' +
+        (String(native.currency).toUpperCase() === 'USD' ? '$' : '') + native.amount +
+        ' ' + esc(String(native.currency)) + '，按 ¥' + (Store.settings().usdRate || 7.3) + '/$ 折算</div>'
+      : '') +
+    (a.balanceUpdatedAt ? '<div class="t-xs c-4" style="margin-top:6px">更新于 ' + esc(relTime(a.balanceUpdatedAt)) + '</div>' : '') +
+    (cred.lastError ? '<div class="t-xs c-rose" style="margin-top:8px;line-height:1.7">上次读取失败：' + esc(cred.lastError) + '</div>' : '') +
     '</div>';
 
-  /* 凭证卡 */
-  html += '<div class="card stack gap-12" style="margin-top:12px">' +
+  /* 统计条 */
+  left += '<div class="card flat plain">' +
+    '<div class="row between"><span class="t-xs c-3">本机记录调用</span>' +
+    '<span class="mono t-md w-600">' + num(logs.length) + ' 次</span></div>' +
+    '<div class="divider" style="margin:9px 0"></div>' +
+    '<div class="row between"><span class="t-xs c-3">成功次数</span>' +
+    '<span class="mono t-md">' + num(okCnt) + '</span></div>' +
+    '<div class="divider" style="margin:9px 0"></div>' +
+    '<div class="row between"><span class="t-xs c-3">估算花费</span>' +
+    '<span class="mono t-md">' + money(cost) + '</span></div>' +
+    '</div>';
+
+  /* 操作 */
+  left += '<div class="section-title">该账号的操作</div>' +
+    '<div class="list-card">' +
+    rowAction('去验证这个接口', '真发一次请求，看能不能通', 'verify', true) +
+    rowAction('拉取可用模型列表', '调 /v1/models 看该密钥能访问哪些模型', 'models') +
+    rowAction('编辑账号信息', '改名称、密钥、BaseURL', 'edit') +
+    '</div>';
+
+  /* ---------- 右栏：凭证 ---------- */
+  let right = '';
+
+  right += '<div class="card stack gap-12">' +
     '<div class="stack gap-8">' +
       '<div class="row between"><span class="t-xs c-3">API Key</span>' +
       '<button class="t-xs c-brand" data-showkey>' + (showKey ? '隐藏' : '显示') + '</button></div>' +
       '<div class="mono t-sm" style="background:var(--card-2);border-radius:10px;padding:11px 12px;word-break:break-all;line-height:1.6">' +
         esc(showKey ? a.apiKey : maskKey(a.apiKey)) + '</div>' +
-      '<div class="row gap-8"><button class="btn soft sm grow" data-copykey>复制密钥</button>' +
-      '<button class="btn ghost sm grow" data-copyboth>复制全部</button></div>' +
+      '<div class="btn-row gap-8"><button class="btn soft sm" data-copykey>复制密钥</button>' +
+      '<button class="btn ghost sm" data-copyboth>复制全部</button></div>' +
     '</div>' +
     '<div class="divider"></div>' +
     '<div class="stack gap-8">' +
@@ -649,39 +946,65 @@ Screens.account = function (root, ctx) {
     '</div>' +
     '</div>';
 
-  /* 统计条 */
-  html += '<div class="strip" style="margin-top:12px">' +
-    '<span class="stack gap-4" style="align-items:flex-start"><span class="s-lab">本机记录调用</span>' +
-    '<span class="mono s-val" style="font-size:15px">' + num(logs.length) + ' 次</span></span>' +
-    '<span class="stack gap-4" style="align-items:flex-end"><span class="s-lab">成功 / 估算花费</span>' +
-    '<span class="mono" style="font-size:15px;font-weight:600">' + num(okCnt) + ' / ' + money(cost) + '</span></span>' +
-    '</div>';
-
-  /* 操作 */
-  html += '<div class="section-title" style="margin-top:16px">该账号的操作</div>' +
-    '<div class="list-card" style="margin-top:8px">' +
-    rowAction('去验证这个接口', '真发一次请求，看能不能通', 'verify', true) +
-    rowAction('拉取可用模型列表', '调 /v1/models 看该密钥能访问哪些模型', 'models') +
-    rowAction('编辑账号信息', '改名称、密钥、BaseURL', 'edit') +
-    '</div>';
+  /* 余额读取方式的说明卡 / 面板登录卡 */
+  if (isPanel) {
+    const hasToken = !!cred.token;
+    right += '<div class="card stack gap-10">' +
+      '<div class="row between"><span class="t-md w-500">中转站面板</span>' +
+      '<span class="tag ' + (hasToken ? 'ok' : 'mute') + '">' + (hasToken ? '已登录过' : '未登录') + '</span></div>' +
+      '<div class="t-xs c-3" style="line-height:1.8">' +
+        '这是 New API / One API 系的中转站。它没有对外的余额接口，' +
+        '余额只能登录站点面板后从 <span class="mono">/api/user/self</span> 读。<br>' +
+        '登录后本机只保留登录凭据；密码要单独勾选才会记住。' +
+      '</div>' +
+      (cred.username ? '<div class="kv"><span class="kv-k">面板账号</span><span class="kv-v">' + esc(cred.username) + '</span></div>' : '') +
+      (hasToken ? '<div class="kv"><span class="kv-k">登录凭据</span><span class="kv-v">已保存' + (cred.tokenAt ? '（' + esc(relTime(cred.tokenAt)) + '）' : '') + '</span></div>' : '') +
+      '<div class="kv"><span class="kv-k">保存密码</span><span class="kv-v">' + (cred.savePassword ? '已勾选' : '未勾选（更安全）') + '</span></div>' +
+      '<div class="btn-row"><button class="btn primary sm" data-panel-login>' + (hasToken ? '重新登录' : '登录面板') + '</button>' +
+      (hasToken ? '<button class="btn ghost sm" data-forget>清除凭据</button>' : '') + '</div>' +
+      '</div>';
+  } else if (kind === 'manual') {
+    right += '<div class="card stack gap-8">' +
+      '<span class="t-md w-500">余额怎么读</span>' +
+      '<div class="t-xs c-3" style="line-height:1.8">' +
+        '「' + esc(p.name) + '」没有开放余额查询接口，只能手动填一个数字，' +
+        '本机用它做汇总和「余额偏低」提醒。' +
+      '</div>' +
+      '<button class="btn ghost sm" data-manual style="align-self:flex-start">手动填写余额</button>' +
+      '</div>';
+  } else {
+    right += '<div class="card stack gap-8">' +
+      '<span class="t-md w-500">余额怎么读</span>' +
+      '<div class="t-xs c-3" style="line-height:1.8">' +
+        '用这个账号的 API Key 直接调 <span class="mono">' +
+        esc((Balance.PROVIDERS[kind] && Balance.PROVIDERS[kind].path) || '') + '</span>，' +
+        '不需要账号密码。点上面的「读取余额」即可。' +
+      '</div>' +
+      '</div>';
+  }
 
   /* 最近记录 */
   if (logs.length) {
-    html += '<div class="section-title" style="margin-top:16px">最近调用</div><div class="list-card" style="margin-top:8px">' +
-      logs.slice(0, 5).map((l) =>
-        '<div class="lrow"><span class="dot ' + (l.status === 'ok' ? 'ok' : 'err') + '"></span>' +
-        '<span class="l-main"><span class="l-title"><span class="mono">' + esc(l.model) + '</span>' +
-        '<span class="grow"></span><span class="mono ' + (l.status === 'ok' ? '' : 'c-4') + '">' +
-        (typeof l.costCNY === 'number' ? money(l.costCNY) : '—') + '</span></span>' +
-        '<span class="l-sub row between"><span>' + esc(relTime(l.ts)) + '</span>' +
-        '<span class="mono">' + (l.latencyMs / 1000).toFixed(1) + 's</span></span></span></div>'
-      ).join('') + '</div>';
+    right += '<div class="section-title">最近调用</div>' +
+      '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+      '<th>模型</th><th>时间</th><th class="num">耗时</th><th class="num">费用</th>' +
+      '</tr></thead><tbody>' +
+      logs.slice(0, 6).map((l) =>
+        '<tr><td class="main-cell mono t-sm">' + esc(l.model || '—') + '</td>' +
+        '<td class="t-sm c-3 nowrap" data-th="时间">' + esc(relTime(l.ts)) + '</td>' +
+        '<td class="num" data-th="耗时">' + (l.latencyMs / 1000).toFixed(1) + 's</td>' +
+        '<td class="num" data-th="费用">' + (typeof l.costCNY === 'number' ? money(l.costCNY) : '—') + '</td></tr>'
+      ).join('') + '</tbody></table></div>';
   }
 
-  html += '<div style="margin-top:18px"><button class="btn danger" data-del>删除这个账号</button></div>';
+  root.innerHTML =
+    '<div class="detail-grid">' +
+      '<div class="detail-col">' + left + '</div>' +
+      '<div class="detail-col">' + right + '</div>' +
+      '<div class="span-2" style="margin-top:4px"><button class="btn danger" data-del>删除这个账号</button></div>' +
+    '</div>';
 
-  root.innerHTML = html;
-
+  /* ---------- 事件 ---------- */
   root.querySelector('[data-showkey]').addEventListener('click', () => {
     Screens.account._showKey = !showKey; render();
   });
@@ -689,7 +1012,6 @@ Screens.account = function (root, ctx) {
   root.querySelector('[data-copyurl]').addEventListener('click', () => UI.copy(a.baseUrl, 'BaseURL 已复制'));
   root.querySelector('[data-copyboth]').addEventListener('click', () => UI.copy(
     '平台：' + p.name + '\n账号：' + a.label + '\nAPI Key：' + a.apiKey + '\nBaseURL：' + a.baseUrl, '已复制全部'));
-  root.querySelector('[data-bal]').addEventListener('click', () => queryBalance(a, p));
   root.querySelector('[data-del]').addEventListener('click', () => {
     UI.confirmDialog('删除账号', '会同时删掉这个账号在本机的调用记录，且无法恢复。密钥本身不受影响。', () => {
       Store.removeAccount(a.id);
@@ -697,6 +1019,22 @@ Screens.account = function (root, ctx) {
       VS.accountId = null; VS.models = []; VS.modelsFor = null;
       back();
     });
+  });
+
+  $$('[data-bal]', root).forEach((b) => b.addEventListener('click', () => {
+    const hasCred = !!(cred.username && cred.password);
+    if (isPanel && !cred.token && !hasCred) panelLoginSheet(a, p);
+    else refreshOneBalance(a.id, b);
+  }));
+  $$('[data-manual]', root).forEach((b) => b.addEventListener('click', () => manualBalanceSheet(a, p)));
+  const pl = root.querySelector('[data-panel-login]');
+  if (pl) pl.addEventListener('click', () => panelLoginSheet(a, p));
+  const fg = root.querySelector('[data-forget]');
+  if (fg) fg.addEventListener('click', () => {
+    UI.confirmDialog('清除登录凭据', '会删掉本机保存的面板登录 token 与密码，余额数字保留。', () => {
+      Store.updateAccount(a.id, { cred: null });
+      UI.toast('已清除', 'ok'); render();
+    }, '清除');
   });
 
   const vBtn = root.querySelector('[data-a-verify]');
@@ -714,36 +1052,6 @@ function rowAction(title, sub, kind, accent) {
     '<span class="c-3">›</span></button>';
 }
 
-async function queryBalance(a, p) {
-  const btn = document.querySelector('[data-bal]');
-  if (btn) { btn.textContent = '查询中…'; btn.disabled = true; }
-  const r = await Api.balance(a, p);
-  if (btn) btn.disabled = false;
-  if (r.ok) {
-    Store.updateAccount(a.id, { balance: r.balance, balanceManual: false, balanceUpdatedAt: Date.now() });
-    UI.toast('余额已更新：' + r.currency + ' ' + r.balance, 'ok');
-    render();
-  } else if (r.kind === 'unsupported') {
-    UI.openSheet({
-      title: '手动填写余额',
-      html: '<div class="field"><label>当前可用余额（元）</label>' +
-        '<input class="input mono" id="bval" type="number" step="0.01" placeholder="例如 52.40" value="' + (typeof a.balance === 'number' ? a.balance : '') + '"></div>' +
-        '<div class="hint" style="margin-top:10px">' + esc(r.message) + '。该数字只存在本机，用于总览汇总。</div>' +
-        '<div class="btn-row" style="margin-top:16px"><button class="btn ghost" data-close>取消</button>' +
-        '<button class="btn primary" data-save>保存</button></div>',
-      onMount(sheet) {
-        sheet.querySelector('[data-save]').addEventListener('click', () => {
-          const v = parseFloat(sheet.querySelector('#bval').value);
-          if (isNaN(v)) { UI.toast('请输入数字', 'err'); return; }
-          Store.updateAccount(a.id, { balance: v, balanceManual: true, balanceUpdatedAt: Date.now() });
-          UI.closeSheet(); UI.toast('已保存', 'ok'); render();
-        });
-      },
-    });
-  } else {
-    UI.toast(r.message || '查询失败', 'err');
-  }
-}
 
 async function pullModels(a) {
   UI.openSheet({
@@ -785,7 +1093,8 @@ Screens.add = function (root, ctx) {
   html += '<div class="field"><label>平台</label><div class="chips" data-plats>' +
     Store.platforms().map((p) =>
       '<button class="chip' + (p.id === pid ? ' on' : '') + '" data-pid="' + esc(p.id) + '">' + esc(p.name) + '</button>'
-    ).join('') + '</div></div>';
+    ).join('') + '</div>' +
+    '<div class="hint" id="f-pf-note"></div></div>';
 
   html += '<div class="field" style="margin-top:14px"><label>账号备注</label>' +
     '<input class="input" id="f-label" placeholder="例如：主账号 / 备用账号 / 测试号" value="' +
@@ -802,9 +1111,11 @@ Screens.add = function (root, ctx) {
     esc(editing ? editing.baseUrl : ((plat && plat.baseUrl) || '')) + '">' +
     '<div class="hint">官方地址可直接留默认；用中转站 / 代理就换成对方的地址。带不带 <span class="mono">/v1</span> 都能识别。</div></div>';
 
-  html += '<div class="field" style="margin-top:14px"><label>当前余额（选填）</label>' +
+  /* 余额：能自动读的平台就交给程序，只有读不到的平台才需要手填 */
+  html += '<div class="field" style="margin-top:14px" id="f-bal-wrap"><label>当前余额（选填）</label>' +
     '<input class="input mono" id="f-bal" type="number" step="0.01" placeholder="不知道该填多少就留空" value="' +
-    (editing && typeof editing.balance === 'number' ? editing.balance : '') + '"></div>';
+    (editing && typeof editing.balance === 'number' ? editing.balance : '') + '">' +
+    '<div class="hint">该平台没有公开的余额接口，只能手动维护一个数字，用于总览汇总。</div></div>';
 
   html += '<div class="field" style="margin-top:14px"><label>默认模型（选填）</label>' +
     '<input class="input mono" id="f-model" placeholder="例如 gpt-4o-mini" value="' +
@@ -818,6 +1129,25 @@ Screens.add = function (root, ctx) {
   root.innerHTML = html;
 
   let curPid = pid;
+
+  /** 平台一换，「余额怎么读」那几行说明和输入框都要跟着换 */
+  function syncPlatformFields(id) {
+    const p = Store.platform(id);
+    const kind = balanceKindOf(p);
+    const note = root.querySelector('#f-pf-note');
+    const wrap = root.querySelector('#f-bal-wrap');
+    if (note) {
+      const how = kind === 'manual'
+        ? '该平台没有公开的余额查询接口，需要手动填余额。'
+        : kind === 'panel'
+          ? '这是中转站面板：添加后填站点账号密码登录一次，就能自动读余额。'
+          : '该平台有官方余额接口，用 API Key 就能直接读余额。';
+      note.textContent = '余额读取方式：' + (BALANCE_KIND_LABEL[kind] || '') + '。' + how;
+    }
+    if (wrap) wrap.style.display = kind === 'manual' ? '' : 'none';
+  }
+  syncPlatformFields(curPid);
+
   $$('[data-ext]', root).forEach((a) => a.addEventListener('click', (e) => {
     e.preventDefault();
     openExternal(a.getAttribute('data-ext'));
@@ -829,23 +1159,30 @@ Screens.add = function (root, ctx) {
     const urlEl = root.querySelector('#f-url');
     if (urlEl && p && p.baseUrl) urlEl.value = p.baseUrl;
     $$('[data-pid]', root).forEach((x) => x.classList.toggle('on', x.getAttribute('data-pid') === curPid));
+    syncPlatformFields(curPid);
   }));
 
   function collect() {
     const label = root.querySelector('#f-label').value.trim() || '主账号';
     const key = root.querySelector('#f-key').value.trim();
     const url = root.querySelector('#f-url').value.trim();
-    const balRaw = root.querySelector('#f-bal').value.trim();
+    const balEl = root.querySelector('#f-bal');
+    const balRaw = (balEl && balEl.closest('#f-bal-wrap').style.display !== 'none') ? balEl.value.trim() : '';
     const model = root.querySelector('#f-model').value.trim();
     if (!key) { UI.toast('请填写 API Key', 'err'); return null; }
     if (!url) { UI.toast('请填写 BaseURL', 'err'); return null; }
     const bal = balRaw === '' ? null : parseFloat(balRaw);
-    return {
+    const out = {
       platformId: curPid, label: label, apiKey: key, baseUrl: url,
-      balance: isNaN(bal) ? null : bal, balanceManual: bal != null,
-      balanceUpdatedAt: bal != null ? Date.now() : null,
       defaultModel: model || '',
     };
+    if (!isNaN(bal)) {
+      out.balance = bal;
+      out.balanceSource = 'manual';
+      out.balanceNative = null;
+      out.balanceUpdatedAt = Date.now();
+    }
+    return out;
   }
 
   root.querySelector('[data-save]').addEventListener('click', () => {
@@ -884,23 +1221,65 @@ Screens.settings = function (root) {
   let html = '';
 
   html += '<div class="section-title">账号管理</div>';
-  html += '<div class="list-card" style="margin-top:8px">';
+  html += '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+    '<th>账号</th><th>平台</th><th>余额</th><th>读取方式</th><th class="right">操作</th>' +
+    '</tr></thead><tbody>';
   if (!accounts.length) {
-    html += '<div class="t-sm c-3" style="padding:16px 0;text-align:center">还没有账号</div>';
+    html += '<tr><td colspan="5" class="t-sm c-3" style="text-align:center;padding:18px">还没有账号</td></tr>';
   } else {
     accounts.forEach((a) => {
       const p = Store.platform(a.platformId);
-      html += '<button class="lrow" style="width:100%;text-align:left" data-acct="' + esc(a.id) + '">' +
-        platformLogo(p) +
-        '<span class="l-main"><span class="l-title">' + esc(a.label) + '</span>' +
-        '<span class="l-sub">' + esc(p ? p.name : '未知平台') + ' · ' + esc(maskKey(a.apiKey)) + '</span></span>' +
-        '<span class="mono t-sm c-2">' + (typeof a.balance === 'number' ? '¥' + a.balance.toFixed(2) : '—') + '</span>' +
-        '<span class="c-3">›</span></button>';
+      html += '<tr class="rowbtn" data-acct="' + esc(a.id) + '">' +
+        '<td class="main-cell"><span class="t-md w-500">' + esc(a.label) + '</span>' +
+          '<div class="sub mono">' + esc(maskKey(a.apiKey)) + '</div></td>' +
+        '<td class="t-sm">' + esc(p ? p.name : '未知平台') + '</td>' +
+        '<td>' + balanceCell(a) + '</td>' +
+        '<td>' + balanceSourceTag(a) + '</td>' +
+        '<td class="right"><span class="c-3">›</span></td></tr>';
     });
   }
-  html += '</div>';
+  html += '</tbody></table></div>';
   html += '<button class="btn ghost" style="width:100%;margin-top:10px" data-go="add">+ 添加账号</button>';
 
+  /* ---------- 金额换算 ---------- */
+  html += '<div class="section-title" style="margin-top:20px">金额换算</div>';
+  html += '<div class="card flat plain stack gap-10" style="margin-top:8px">' +
+    '<div class="row between">' +
+    '<span class="stack gap-4 self-start"><span class="t-sm">美元汇率</span>' +
+    '<span class="hint">OpenRouter、多数中转站面板按美元计账，统一按这个价换成本地金额</span></span>' +
+    '<span class="row gap-6"><span class="t-sm c-3">¥</span>' +
+    '<input class="input mono" id="f-rate" type="number" step="0.01" min="0.01" style="width:88px;padding:8px 10px" value="' +
+      esc(String(s.usdRate || 7.3)) + '"><span class="t-sm c-3">/ $</span></span>' +
+    '</div></div>';
+
+  /* ---------- 余额读取能力 ---------- */
+  const usedKinds = [];
+  Store.platforms().forEach((p) => {
+    if (Store.accountsOf(p.id).length && usedKinds.indexOf(balanceKindOf(p)) < 0) usedKinds.push(balanceKindOf(p));
+  });
+  const capRows = [
+    ['deepseek', 'GET /user/balance', '拿 API Key 直接读，不需要账号密码'],
+    ['moonshot', 'GET /v1/users/me/balance', '拿 API Key 直接读'],
+    ['siliconflow', 'GET /v1/user/info', '拿 API Key 直接读'],
+    ['openrouter', 'GET /api/v1/key', '普通密钥读本密钥额度；账户总额度需要 Management Key'],
+    ['panel', '登录面板后读 /api/user/self', '需要站点账号密码；站点开了人机验证就无法自动读'],
+    ['manual', '—', '平台没开放余额接口，只能手动填'],
+  ];
+
+  html += '<div class="section-title" style="margin-top:20px">余额读取能力</div>';
+  html += '<div class="tbl-wrap" style="margin-top:8px"><table class="tbl wide"><thead><tr>' +
+    '<th>方式</th><th>接口 / 途径</th><th>说明</th></tr></thead><tbody>' +
+    capRows.map((r) =>
+      '<tr><td class="nowrap">' +
+        (usedKinds.indexOf(r[0]) >= 0 ? '<span class="dot ok" style="display:inline-block;margin-right:6px"></span>' : '') +
+        esc(BALANCE_KIND_LABEL[r[0]] || r[0]) + '</td>' +
+      '<td class="mono t-sm c-2" data-th="接口">' + esc(r[1]) + '</td>' +
+      '<td class="t-sm c-2" data-th="说明">' + esc(r[2]) + '</td></tr>'
+    ).join('') +
+    '</tbody></table></div>' +
+    '<div class="hint" style="margin-top:8px">带绿点的表示你当前已经在用这种读取方式。</div>';
+
+  /* ---------- 请求设置 ---------- */
   html += '<div class="section-title" style="margin-top:20px">请求设置</div>';
   html += '<div class="list-card" style="margin-top:8px">' +
     '<div class="lrow"><span class="l-main"><span class="l-title">超时时间</span>' +
@@ -917,11 +1296,15 @@ Screens.settings = function (root) {
     '</select></div>' +
     '</div>';
 
+  /* ---------- 数据 ---------- */
   html += '<div class="section-title" style="margin-top:20px">数据</div>';
   html += '<div class="list-card" style="margin-top:8px">' +
-    '<button class="lrow" style="width:100%;text-align:left" data-export>' +
+    '<button class="lrow" style="width:100%;text-align:left" data-export data-safe="1">' +
     '<span class="l-main"><span class="l-title">导出全部数据</span>' +
-    '<span class="l-sub">账号、密钥、调用记录打包成 JSON</span></span><span class="c-3">›</span></button>' +
+    '<span class="l-sub">账号、密钥、调用记录打包成 JSON —— 不含面板登录密码（推荐）</span></span><span class="c-3">›</span></button>' +
+    '<button class="lrow" style="width:100%;text-align:left" data-export data-safe="0">' +
+    '<span class="l-main"><span class="l-title">导出（含面板登录密码）</span>' +
+    '<span class="l-sub">中转站的账号密码会一起写进文件，只适合自己留档</span></span><span class="c-3">›</span></button>' +
     '<button class="lrow" style="width:100%;text-align:left" data-import>' +
     '<span class="l-main"><span class="l-title">从 JSON 导入</span>' +
     '<span class="l-sub">会覆盖当前全部数据</span></span><span class="c-3">›</span></button>' +
@@ -936,6 +1319,7 @@ Screens.settings = function (root) {
     '<span class="l-sub">账号、密钥、记录全部删除，不可恢复</span></span><span class="c-3">›</span></button>' +
     '</div>';
 
+  /* ---------- 运行环境 ---------- */
   html += '<div class="section-title" style="margin-top:20px">运行环境</div>';
   html += '<div class="card flat plain stack gap-10" style="margin-top:8px">' +
     '<div class="row between"><span class="t-sm c-2">网络模式</span>' +
@@ -943,58 +1327,41 @@ Screens.settings = function (root) {
     '<div class="row between"><span class="t-sm c-2">明文密钥存储</span>' +
     '<span class="tag warn">本机 localStorage</span></div>' +
     '<div class="row between"><span class="t-sm c-2">版本</span><span class="t-sm mono">v' + esc(APP_VERSION) + '</span></div>' +
-    '<div class="t-xs c-4" style="line-height:1.7">密钥以明文存在浏览器本地存储里，方便随时复制。共用电脑时，用完建议导出备份后「清空全部数据」。</div>' +
+    '<div class="t-xs c-4" style="line-height:1.7">密钥与面板登录凭据都以明文存在浏览器本地存储里，方便随时复制。' +
+    '共用电脑时，用完建议导出备份后「清空全部数据」。</div>' +
+    (mode === 'proxy'
+      ? '<div class="divider"></div><button class="btn ghost sm" data-shutdown style="align-self:flex-start">退出程序（停止本地服务）</button>' +
+        '<div class="hint">点这个会关掉后台的本地服务，之后网页就打不开了。想再用就重新运行启动脚本。</div>'
+      : '') +
     '</div>';
 
   root.innerHTML = html;
 
-  $$('[data-acct]', root).forEach((b) => b.addEventListener('click', () => go('account', b.getAttribute('data-acct'))));
+  $$('[data-acct]', root).forEach((tr) => tr.addEventListener('click', () => go('account', tr.getAttribute('data-acct'))));
   root.querySelector('[data-go]').addEventListener('click', () => go('add'));
   root.querySelector('[data-timeout]').addEventListener('change', (e) => Store.setSetting('timeoutMs', Number(e.target.value)));
   root.querySelector('[data-maxtok]').addEventListener('change', (e) => Store.setSetting('verifyMaxTokens', Number(e.target.value)));
 
-  root.querySelector('[data-export]').addEventListener('click', () => {
-    const json = Store.exportJson();
-    const stamp = new Date().toISOString().slice(0, 10);
-    const name = 'ai-api-hub-backup-' + stamp + '.json';
+  const rateEl = root.querySelector('#f-rate');
+  if (rateEl) {
+    rateEl.addEventListener('change', () => {
+      const v = parseFloat(rateEl.value);
+      if (!(v > 0)) { UI.toast('汇率要大于 0', 'err'); rateEl.value = String(s.usdRate || 7.3); return; }
+      Store.setSetting('usdRate', v);
+      UI.toast('汇率已更新为 ¥' + v + '/$', 'ok');
+      render();
+    });
+  }
 
-    /* 安卓 WebView 里 <a download> 是不生效的，点了没有任何反应。
-       所以在原生壳里改成「把内容摆出来 + 一键复制」，用户可以自己存到文件。 */
-    if (typeof inNativeShell === 'function' && inNativeShell()) {
-      UI.openSheet({
-        title: '导出全部数据',
-        html: '<div class="field"><label>备份内容（' + name + '）</label>' +
-          '<textarea class="textarea mono" id="exp" readonly style="min-height:160px;font-size:10px"></textarea></div>' +
-          '<div class="hint" style="margin-top:8px">手机端不能直接下载文件。点下面的按钮复制走，' +
-          '再粘贴到备忘录或电脑上的 .json 文件里保存。</div>' +
-          '<div class="btn-row" style="margin-top:14px"><button class="btn ghost" data-close>关闭</button>' +
-          '<button class="btn primary" data-copy>复制全部内容</button></div>',
-        onMount(sheet) {
-          const ta = sheet.querySelector('#exp');
-          ta.value = json;
-          sheet.querySelector('[data-copy]').addEventListener('click', () => {
-            ta.select();
-            UI.copy(json, '备份内容已复制');
-          });
-        },
-      });
-      return;
-    }
-
-    const blob = new Blob([json], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = name;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 3000);
-    UI.toast('已导出备份文件', 'ok');
-  });
+  $$('[data-export]', root).forEach((b) => b.addEventListener('click', () => {
+    exportData(b.getAttribute('data-safe') === '1');
+  }));
 
   root.querySelector('[data-import]').addEventListener('click', () => {
     UI.openSheet({
       title: '从 JSON 导入',
       html: '<div class="field"><label>粘贴备份内容</label>' +
-        '<textarea class="textarea mono" id="imp" style="min-height:140px;font-size:10px" placeholder="把备份文件内容粘贴到这里"></textarea></div>' +
+        '<textarea class="textarea mono" id="imp" style="min-height:140px;font-size:11px" placeholder="把备份文件内容粘贴到这里"></textarea></div>' +
         '<div class="btn-row" style="margin-top:16px"><button class="btn ghost" data-close>取消</button>' +
         '<button class="btn primary" data-do>导入并覆盖</button></div>',
       onMount(sheet) {
@@ -1015,7 +1382,7 @@ Screens.settings = function (root) {
   });
 
   root.querySelector('[data-demo]').addEventListener('click', () => {
-    UI.confirmDialog('载入演示数据', '会覆盖当前账号与记录，写入 4 个假账号和 6 条假调用记录。旧数据不会保留。', () => {
+    UI.confirmDialog('载入演示数据', '会覆盖当前账号与记录，写入 6 个假账号和 8 条假调用记录。旧数据不会保留。', () => {
       Store.loadDemo(); VS.accountId = null; UI.toast('已载入演示数据', 'ok'); render();
     }, '载入');
   });
@@ -1026,4 +1393,53 @@ Screens.settings = function (root) {
       UI.toast('已清空', 'ok'); go('overview');
     }, '确认清空');
   });
+
+  const sd = root.querySelector('[data-shutdown]');
+  if (sd) sd.addEventListener('click', () => {
+    UI.confirmDialog('退出程序', '本地服务会停掉，网页随之失效。下次使用重新运行启动脚本即可。', async () => {
+      try { await fetch('/api/shutdown', { method: 'POST' }); } catch (_) {}
+      document.body.innerHTML =
+        '<div class="empty" style="padding-top:22vh">' +
+        '<div class="em-title">已经退出</div>' +
+        '<div class="em-sub">本地服务已停止，这个页面可以关掉了。<br>下次使用重新运行启动脚本即可。</div></div>';
+    }, '退出');
+  });
 };
+
+/** 导出：默认剥掉面板密码，只有明确选了「含密码」才带出去 */
+function exportData(safe) {
+  const json = Store.exportJson({ includeCreds: !safe });
+  const stamp = new Date().toISOString().slice(0, 10);
+  const name = 'ai-api-hub-backup-' + stamp + (safe ? '' : '-with-credentials') + '.json';
+
+  /* 安卓 WebView 里 <a download> 是不生效的，点了没有任何反应。
+     所以在原生壳里改成「把内容摆出来 + 一键复制」，用户可以自己存到文件。 */
+  if (typeof inNativeShell === 'function' && inNativeShell()) {
+    UI.openSheet({
+      title: '导出全部数据',
+      html: '<div class="field"><label>备份内容（' + name + '）</label>' +
+        '<textarea class="textarea mono" id="exp" readonly style="min-height:160px;font-size:10px"></textarea></div>' +
+        '<div class="hint" style="margin-top:8px">手机端不能直接下载文件。点下面的按钮复制走，' +
+        '再粘贴到备忘录或电脑上的 .json 文件里保存。</div>' +
+        '<div class="btn-row" style="margin-top:14px"><button class="btn ghost" data-close>关闭</button>' +
+        '<button class="btn primary" data-copy>复制全部内容</button></div>',
+      onMount(sheet) {
+        const ta = sheet.querySelector('#exp');
+        ta.value = json;
+        sheet.querySelector('[data-copy]').addEventListener('click', () => {
+          ta.select();
+          UI.copy(json, '备份内容已复制');
+        });
+      },
+    });
+    return;
+  }
+
+  const blob = new Blob([json], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  UI.toast(safe ? '已导出（不含面板密码）' : '已导出（含面板密码，注意保管）', 'ok');
+}

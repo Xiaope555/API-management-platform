@@ -18,3 +18,7 @@ app/android/capacitor-cordova-android-plugins/
 _*.txt
 _*.log
 _*.ps1
+_*.js
+
+# 调研时拉下来的第三方源码片段（new-api 等），只作参考，不进仓库
+_ref/
