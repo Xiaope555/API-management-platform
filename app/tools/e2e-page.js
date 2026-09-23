@@ -521,6 +521,17 @@
   ok('签到：账号上留下了上次签到状态（成功类）',
     !!ckState && ckState.ok === true && ckState.at > 0, ckState && ckState.kind);
 
+  /* 21.9 /api/status 回一张网页（SPA 兜底）→ 如实归类 not_panel，
+     而不是误导用户去查「返回格式」—— 这是真实用户撞到的场景 */
+  const aHtml = mk('custom', 'http://127.0.0.1:8899/htmlfallback');
+  const qHtml = await Balance.query(Store.account(aHtml.id), P_CUSTOM, { username: 'demo', password: 'demo123' });
+  ok('面板：/api/status 回网页的站点归类为 not_panel（话要说准）',
+    qHtml.ok === false && qHtml.kind === 'not_panel' && /网页/.test(qHtml.message),
+    qHtml.kind + ' / ' + String(qHtml.message).slice(0, 50));
+  const cHtml = await Checkin.checkin(Store.account(aHtml.id), { username: 'demo', password: 'demo123' });
+  ok('签到：回网页的站点同样如实归类 not_panel',
+    cHtml.ok === false && cHtml.kind === 'not_panel', cHtml.kind);
+
   /* ===================================================================
      20. 电脑端布局
      宽屏是左侧固定导航 + 表格；窄屏靠同一份 DOM 加 CSS 降级成卡片。

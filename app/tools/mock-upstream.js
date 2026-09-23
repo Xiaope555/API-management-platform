@@ -50,6 +50,9 @@ const PANELS = {
   '/signin':    { turnstile: false, encryption: false, user: 'demo', pass: 'demo123', signinOnly: true },
   /* 压根没有签到接口的面板 —— 签到必须明确报 not_supported，不能假装成功 */
   '/nocheckin': { turnstile: false, encryption: false, user: 'demo', pass: 'demo123', nocheckin: true },
+  /* /api/status 回的是一张网页（SPA 把未知路径兜底到 index.html）——
+     必须归类「不是面板」，而不是误导用户去查「返回格式」 */
+  '/htmlfallback': { turnstile: false, encryption: false, user: 'demo', pass: 'demo123', htmlStatus: true },
 };
 
 /* 各面板「今天已签到」的状态。key = 面板前缀 —— 同一份 token 在不同面板互不影响 */
@@ -99,6 +102,11 @@ function handlePanel(prefix, url, req, res, rawBody) {
   const sub = url.slice(prefix.length);          // '/api/status' 之类
 
   if (req.method === 'GET' && sub === '/api/status') {
+    if (rec.htmlStatus) {
+      /* 复刻「SPA 兜底」：未知路径照样 200 + 一整张网页 */
+      return html(res, 200, '<!doctype html>\n<html lang="zh-CN" class="h-full"><head><meta charset="UTF-8" /></head>' +
+        '<body><div id="root">frontend shell</div></body></html>');
+    }
     return json(res, 200, {
       success: true,
       data: {
@@ -199,6 +207,14 @@ function json(res, code, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(code, {
     'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+  });
+  res.end(body);
+}
+
+function html(res, code, body) {
+  res.writeHead(code, {
+    'Content-Type': 'text/html; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
   });
   res.end(body);

@@ -10,7 +10,7 @@
 /* 版本号显示。APK 里用这个常量（跟随构建更新）；网页版启动后会被服务端
    /api/health 报告的版本覆盖（见 main.js 的 boot）—— 因为这里曾经硬编码成
    1.2.0 一直没跟着发版更新，用户装了新版本却看到旧号，根本分不清有没有生效。 */
-let APP_VERSION = '1.3.0';
+let APP_VERSION = '1.3.1';
 const STORE_KEY = 'aihub.v1';
 const LOG_LIMIT = 500;
 
@@ -1074,6 +1074,17 @@ const Balance = (function () {
     if (r.status !== 200) {
       return { ok: false, kind: r.kind, status: r.status, root: root, raw: r.body, message: errMessageOf(r) };
     }
+    /* 200 但回的是一张网页 —— 很多站点会把未知路径兜底到自己的前端页面
+       （所以 HTTP 200 + content-type: text/html）。这不是「返回格式改了」，
+       而是这个地址上根本没有面板接口：按 not_panel 归类，话要说准，
+       不能让用户去查一个不存在的「返回格式」问题。 */
+    const ctype = String((r.headers && (r.headers['content-type'] || r.headers['Content-Type'])) || '');
+    const bodyHead = String(r.body || '').slice(0, 200);
+    if (/text\/html/i.test(ctype) || /^\s*<(!doctype|html)/i.test(bodyHead)) {
+      return { ok: false, kind: 'not_panel', status: r.status, root: root, raw: r.body,
+               message: '这个地址返回的是一张网页而不是面板接口（HTTP 200 + HTML）。' +
+                        '它不是 New API 系面板，或者 BaseURL 少了 / 多了路径 —— 确认一下站点的接口地址' };
+    }
     try {
       const j = JSON.parse(r.body);
       const d = (j && j.data) || j || {};
@@ -1545,6 +1556,7 @@ const Checkin = (function () {
 
       let j = null;
       try { j = JSON.parse(r.body); } catch (_) {}
+      if (!j) { saw404 = true; continue; }   /* 回的是网页不是接口 —— 这个路径上没有签到 API，换下一个候选 */
       if (j && j.success === true) {
         const d = j.data || {};
         const reward = Balance.numOf(d.quota != null ? d.quota : d.reward);

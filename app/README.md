@@ -187,6 +187,7 @@ GET /api/user/self                   Authorization: Bearer <token>
 
 - **`/api/user/self` 只要 `Authorization: Bearer <access_token>`**，不需要 `New-Api-User` 头（源码 `middleware/auth.go` 的 `authorizationToken()` 只取 Bearer）。
 - **`/api/status` 是公开端点**，匿名就能读。所以**探测时拿到 401 恰恰说明「这里不是面板」** —— 工具据此归为「不是面板站点」并提示检查地址，而不是误导你去查一个根本不存在的面板账号密码。
+- **`/api/status` 回一张网页（HTTP 200 + HTML）同样说明「这不是面板」** —— 不少站点会把未知路径兜底到自己的前端页面。这不是「返回格式改了」，是地址上没有面板接口：检查 BaseURL 是否少了 / 多了路径。
 - **拿到 token 之后就免登录**。凭据链只在第一次需要账号密码。
 - **密码超长时不静默降级。** 官方前端在密码超出 RSA-OAEP 长度时会走 v2 格式（RSA-OAEP 包 AES-GCM），本实现没做 v2，而是直接报错「密码过长」—— 静默改成别的格式会提交出服务器解不开的密文，比报错更糟。
 
@@ -254,7 +255,7 @@ app/
 ├── tools/
 │   ├── mock-upstream.js      模拟上游 + 三套中转站面板（自测用，不参与运行）
 │   ├── e2e.js                端到端自测驱动（无头 Chrome + CDP，零依赖）
-│   ├── e2e-page.js           注入页面跑的主套件（187 条断言）
+│   ├── e2e-page.js           注入页面跑的主套件（189 条断言）
 │   ├── e2e-desktop.js        切到 1440×900 复核电脑端真实计算值（22 条）
 │   ├── shot.js               出 README 截图（桌面 1440 / 手机 390 两组）
 │   └── build-android.ps1     跑 APK 编译
@@ -273,7 +274,7 @@ node server.js               # 另开一个终端
 node tools/e2e.js
 ```
 
-会自己拉起模拟上游、用无头 Chrome 驱动真实页面、跑完 **209 条断言**再收尾：
+会自己拉起模拟上游、用无头 Chrome 驱动真实页面、跑完 **211 条断言**再收尾：
 
 ```
   OK  坏密钥被归类为 auth_invalid
@@ -297,7 +298,7 @@ node tools/e2e.js
   OK  返回键：已在总览时先提示「再按一次退出」，不直接踢出去
   OK  导航：侧栏/抽屉底部有「退出程序」入口
   OK  版本号：界面显示的版本 === 服务端正在跑的版本
-结果：209 / 209 通过
+结果：211 / 211 通过
 ```
 
 **「RSA-OAEP 被真私钥解开」是怎么验的**：模拟面板启动时用 `crypto.generateKeyPairSync` 现生成一对真 RSA 密钥，公钥下发给页面、私钥留在服务端。页面用 WebCrypto 按 `RSA-OAEP(SHA-256)` 加密密码提交，服务端拿私钥去解 —— **解得开，才说明浏览器侧的实现是字节级正确的**，而不是「看着像对」。这条路径在真站点上没法调试，只能在本地把它证明出来。
