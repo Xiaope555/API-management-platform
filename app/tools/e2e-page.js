@@ -24,7 +24,7 @@
   /* ---------- 2. 拉模型列表 ---------- */
   const lm = await Api.listModels(acct, 8000);
   ok('GET /v1/models 成功', lm.ok === true, { ok: lm.ok, kind: lm.kind, status: lm.status });
-  ok('模型列表解析正确（3 个）', lm.ok && lm.models.length === 3 && lm.models[0] === 'mock-chat-mini', lm.models);
+  ok('模型列表解析正确（6 个，含 3 个流式测试模型）', lm.ok && lm.models.length === 6 && lm.models[0] === 'mock-chat-mini', lm.models);
 
   /* ---------- 3. 坏密钥 → auth_invalid ---------- */
   const bad = await Api.listModels(Object.assign({}, acct, { apiKey: 'wrong-key' }), 8000);
@@ -205,6 +205,90 @@
 
   window.fetch = origFetch;
   await Net.detect();
+
+  /* ===================================================================
+     18. 流式（SSE）响应 —— 真实中转站最常见的「不守规矩」行为
+     请求体里写着 stream:false，它照样回 text/event-stream。
+     早先的解析器不认这种响应，会把 HTTP 200 的可用 Key 误报成「请求失败」。
+     =================================================================== */
+
+  /* --- 18.1 纯函数：三种响应形状都要认 --- */
+  const pStd = parseChatBody(JSON.stringify({
+    object: 'chat.completion',
+    choices: [{ index: 0, message: { role: 'assistant', content: '标准回复' }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 3, completion_tokens: 5, total_tokens: 8 },
+  }));
+  ok('解析器：标准非流式 completion', pStd.ok && pStd.text === '标准回复' && pStd.usage.total_tokens === 8, { text: pStd.text, shape: pStd.shape });
+
+  const pChunk = parseChatBody(JSON.stringify({
+    object: 'chat.completion.chunk',
+    choices: [{ index: 0, delta: { content: '单个分片' }, finish_reason: 'stop' }],
+  }));
+  ok('解析器：单个 chunk（没被 SSE 包裹）', pChunk.ok && pChunk.text === '单个分片' && pChunk.streamed === false, { text: pChunk.text, shape: pChunk.shape });
+
+  const sseSample = [
+    'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}',
+    '',
+    'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"你"}}]}',
+    'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"好"}}]}',
+    '',
+    'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+    'data: [DONE]',
+    '',
+  ].join('\n');
+  const pSse = parseChatBody(sseSample);
+  ok('解析器：SSE 分片被拼接成完整正文', pSse.ok && pSse.streamed && pSse.text === '你好', { text: pSse.text, shape: pSse.shape });
+  ok('解析器：SSE 的 finish_reason 被保留', pSse.finishReason === 'stop', pSse.finishReason);
+  ok('解析器：SSE 里的 [DONE] 不会被当成内容', pSse.text.indexOf('DONE') < 0, pSse.text);
+
+  /* 见过的畸形上游：把整个 chunk 又套一层塞进 delta */
+  const pNest = parseChatBody('data: ' + JSON.stringify({
+    object: 'chat.completion.chunk',
+    choices: [{ index: 0, delta: { role: 'assistant', choices: [{ index: 0, delta: { content: '套娃正文' }, finish_reason: 'stop' }] } }],
+  }));
+  ok('解析器：能穿透被套娃的 delta', pNest.ok && pNest.text === '套娃正文', { text: pNest.text });
+
+  const pErrInSse = parseChatBody('data: ' + JSON.stringify({ error: { message: 'boom' } }));
+  ok('解析器：流内的 error 会被单独拎出来', !!pErrInSse.error && pErrInSse.error.message === 'boom', pErrInSse.error);
+
+  ok('解析器：真垃圾（HTML 错误页）仍判为认不出', parseChatBody('<html><body>502 Bad Gateway</body></html>').ok === false, '');
+  ok('解析器：空响应体不崩', parseChatBody('').ok === false && parseChatBody('').text === '', '');
+  ok('解析器：null 响应体不崩', parseChatBody(null).ok === false, '');
+
+  /* --- 18.2 真跑一次「硬吐 SSE」的上游 --- */
+  const s1 = await Api.chat(acct, 'mock-stream', [{ role: 'user', content: '你好' }], 64, 8000);
+  ok('SSE 上游：HTTP 200 判定为成功（不再误报失败）', s1.ok === true, { ok: s1.ok, kind: s1.kind, shape: s1.shape });
+  ok('SSE 上游：分片正文被正确拼接', s1.ok && s1.text.indexOf('流式分片拼出来的回复') >= 0, String(s1.text).slice(0, 60));
+  ok('SSE 上游：标记 streamed 与分片数', s1.ok && s1.streamed === true && s1.chunks >= 5, { streamed: s1.streamed, chunks: s1.chunks });
+  ok('SSE 上游：无 usage 时给估算 token 并打标', s1.ok && s1.tokEstimated === true && s1.totalTok > 0, { est: s1.tokEstimated, total: s1.totalTok });
+
+  /* --- 18.3 只回推理内容、没有正文 --- */
+  const s2 = await Api.chat(acct, 'mock-stream-empty', [{ role: 'user', content: '你好' }], 64, 8000);
+  ok('只回推理内容时仍算「接口连通」', s2.ok === true && s2.emptyText === true && s2.text === '', { ok: s2.ok, empty: s2.emptyText });
+  ok('推理内容长度被记录下来', s2.ok && s2.reasoningLen > 0, s2.reasoningLen);
+
+  /* --- 18.4 错误藏在 HTTP 200 的流里 --- */
+  const s3 = await Api.chat(acct, 'mock-stream-error', [{ role: 'user', content: '你好' }], 64, 8000);
+  ok('流内错误被抓出来，不当成功', s3.ok === false && s3.kind === 'upstream_error', { ok: s3.ok, kind: s3.kind });
+  ok('流内错误文案透传到界面', s3.ok === false && /relay quota exhausted/.test(String(s3.message)), s3.message);
+
+  /* --- 18.5 走真实 UI 路径：流式响应要能显示出来 --- */
+  VS.accountId = acct.id;
+  VS.model = 'mock-stream';
+  VS.messages = [];
+  VS.busy = false;
+  VS.last = null;
+  go('verify');
+  await sendMessage('流式测试');
+  const vt2 = document.querySelector('#view').textContent;
+  ok('UI：流式回复出现在气泡里', vt2.indexOf('流式分片拼出来的回复') >= 0, '');
+  ok('UI：成功卡标注了「流式响应」', vt2.indexOf('流式响应') >= 0, '');
+  const lg4 = Store.logs()[0];
+  ok('日志：记下 streamed 与估算标记', !!lg4 && lg4.streamed === true && lg4.tokEstimated === true, lg4 ? { s: lg4.streamed, e: lg4.tokEstimated } : null);
+
+  /* --- 18.6 认不出格式时，不能再甩一个空的「可能的原因」 --- */
+  ok('兜底文案非空（不会出现空白的原因列表）', failInfo('ok').todo.length > 0 && failInfo(undefined).todo.length > 0, failInfo('ok').todo);
+  ok('parse 的指引指向「看请求诊断」', failInfo('parse').todo.join(' ').indexOf('诊断') >= 0, failInfo('parse').todo);
 
   R.pass = R.steps.filter((s) => s.pass).length;
   R.total = R.steps.length;

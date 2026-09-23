@@ -32,9 +32,15 @@ const SHOTS = [
       VS.messages = [
         { role: 'user', content: '用一句话说明你是什么模型' },
         { role: 'assistant', content: '我是 gpt-4o-mini，一个面向日常任务的语言模型。',
-          ok: true, meta: 'HTTP 200 · 1.24s · 52 tokens' }
+          ok: true, meta: 'HTTP 200 · 1.24s · 60 tokens（估） · 流式' }
       ];
-      VS.last = { ok: true, status: 200, latencyMs: 1080, totalTok: 68, cost: null, hasPrice: false, model: VS.model };
+      // 结果卡按「上游硬吐 SSE」这条真实路径来摆：流式响应 + 分片数 + usage 估算
+      VS.last = {
+        ok: true, status: 200, latencyMs: 1240,
+        totalTok: 60, cost: 0.000175, hasPrice: true, model: VS.model,
+        tokEstimated: true, streamed: true, chunks: 14,
+        emptyText: false, reasoningLen: 0, finishReason: 'stop'
+      };
       VS.busy = false;
     })()` },
   { file: '03-logs.png', nav: "go('logs')" },

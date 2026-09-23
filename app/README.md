@@ -138,7 +138,7 @@ app/
 ├── capacitor.config.json     APK 配置（webDir=www，CapacitorHttp 已开）
 ├── start.bat                 双击起服务
 ├── dist/
-│   └── API-Hub-1.0-debug.apk 编译好的安卓包
+│   └── API-Hub-1.1-debug.apk 编译好的安卓包
 ├── www/
 │   ├── index.html            单页外壳（360×800 手机容器）
 │   ├── app.css               设计系统变量 + 全部组件样式
@@ -166,7 +166,7 @@ npm start                    # 另开一个终端
 node tools/e2e.js
 ```
 
-会自己拉起模拟上游、用无头 Chrome 驱动真实页面、跑完 50 条断言再收尾：
+会自己拉起模拟上游、用无头 Chrome 驱动真实页面、跑完 73 条断言再收尾：
 
 ```
   OK  运行环境识别为 proxy（本地 Node 代理已生效）
@@ -176,11 +176,17 @@ node tools/e2e.js
   OK  界面上出现模型回复气泡
   OK  原生通道能完成一次对话          ← APK 唯一的网络通道
   OK  直连被跨域拦住，归类 cors
+  OK  解析器：SSE 分片被拼接成完整正文
+  OK  SSE 上游：HTTP 200 判定为成功（不再误报失败）
+  OK  只回推理内容时仍算「接口连通」
+  OK  流内错误被抓出来，不当成功
   ...
-结果：50 / 50 通过
+结果：73 / 73 通过
 ```
 
-覆盖：模型列表拉取、对话补全、usage 解析、费用估算、前缀匹配、日志写入与截断、导入导出往返、失败分类（401/404/429/超时/域名不通/跨域）、BaseURL 四种写法容错、以及三条网络通道各自的正确性。
+`tools/mock-upstream.js` 里的 `mock-stream` / `mock-stream-empty` / `mock-stream-error` 三个模型是**故意做歪的**——收到 `stream: false` 也照样回 SSE，其中一个还把错误藏在 HTTP 200 的流里。真实中转站就这么不守规矩，所以测试里先复刻出来。
+
+覆盖：模型列表拉取、对话补全、三种响应形状的解析（非流式 / SSE / 单 chunk）、流内错误识别、usage 解析与缺失时的 token 估算、费用估算、前缀匹配、日志写入与截断、导入导出往返、失败分类（401/404/429/超时/域名不通/跨域）、BaseURL 四种写法容错、以及三条网络通道各自的正确性。
 
 ---
 

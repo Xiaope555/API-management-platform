@@ -17,3 +17,4 @@ app/android/capacitor-cordova-android-plugins/
 # 临时文件
 _*.txt
 _*.log
+_*.ps1

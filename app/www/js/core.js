@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- 常量 */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const STORE_KEY = 'aihub.v1';
 const LOG_LIMIT = 500;
 
@@ -430,6 +430,9 @@ const Net = (function () {
         }
         const res = await http.request({
           url, method, headers, data,
+          /* 明确要文本：Capacitor 默认会试着把响应 JSON.parse 一遍，
+             遇到 SSE 这种不是 JSON 的流式响应容易把内容搞坏 */
+          responseType: 'text',
           connectTimeout: timeoutMs,
           readTimeout: timeoutMs,
         });
@@ -494,6 +497,127 @@ function apiUrl(base, endpoint) {
   return b + endpoint;
 }
 
+/* ---------------------------------------------------------------- 响应解析
+ *
+ * 「OpenAI 兼容」的上游实际有三副面孔，必须都认：
+ *   1. 标准非流式  { object:'chat.completion',        choices:[{message:{content}}] }
+ *   2. SSE 流式    data: {...chat.completion.chunk...} 逐条 delta 攒出来
+ *   3. 单个 chunk  { object:'chat.completion.chunk',  choices:[{delta:{content}}] }
+ *
+ * 第 2 种最容易踩：请求体里明明写了 stream:false，相当多中转站照样硬吐 SSE。
+ * 之前只认第 1 种，于是把 HTTP 200 的可用接口误判成「无法解析」，再被兜底文案
+ * 显示成「请求失败 / 未知错误」—— 明明能用的 Key 被自己的解析器判了死刑。
+ */
+
+/** 响应体是不是 SSE（text/event-stream） */
+function isSseBody(text) {
+  const t = String(text == null ? '' : text);
+  return /^[ \t]*(?:data|event)[ \t]*:/m.test(t.slice(0, 8192));
+}
+
+/** 把 SSE 里的 data: 负载逐条取出（丢掉注释心跳与 [DONE]） */
+function ssePayloads(text) {
+  const out = [];
+  const lines = String(text == null ? '' : text).split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].replace(/^[ \t]+/, '');
+    if (!line || line.charAt(0) === ':') continue;
+    if (line.slice(0, 5).toLowerCase() !== 'data:') continue;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === '[DONE]') continue;
+    out.push(payload);
+  }
+  return out;
+}
+
+/** 从一个 chunk / completion 里把正文、推理内容、收尾原因抠出来 */
+function textOfChunk(chunk) {
+  let text = '', reasoning = '', finish = '';
+  const walk = (node, depth) => {
+    if (!node || typeof node !== 'object' || depth > 6) return;
+    if (Array.isArray(node)) {
+      for (let i = 0; i < node.length; i++) walk(node[i], depth + 1);
+      return;
+    }
+    if (typeof node.content === 'string') text += node.content;
+    if (typeof node.reasoning_content === 'string') reasoning += node.reasoning_content;
+    if (typeof node.reasoning === 'string') reasoning += node.reasoning;
+    if (typeof node.finish_reason === 'string' && node.finish_reason) finish = node.finish_reason;
+    /* 只沿「可能装正文」的字段往下钻，免得把 error.message 之类的文本也吃进来。
+       顺带兜住一种见过的畸形上游：把整个 chunk 又套一层塞进 delta 里。 */
+    walk(node.choices, depth + 1);
+    walk(node.delta, depth + 1);
+    walk(node.message, depth + 1);
+  };
+  walk(chunk && chunk.choices, 0);
+  return { text: text, reasoning: reasoning, finish: finish };
+}
+
+/**
+ * 解析一次对话请求的响应体，三种形状通吃。
+ * ok=false 只表示「认不出这是对话结构」，不代表 HTTP 失败。
+ */
+function parseChatBody(raw) {
+  const body = typeof raw === 'string' ? raw : (raw == null ? '' : JSON.stringify(raw));
+  const res = {
+    ok: false, shape: '', text: '', reasoning: '', error: null,
+    usage: null, finishReason: '', id: '', model: '', streamed: false, chunks: 0,
+  };
+
+  const take = (chunk) => {
+    if (!chunk || typeof chunk !== 'object') return;
+    const t = textOfChunk(chunk);
+    res.text += t.text;
+    res.reasoning += t.reasoning;
+    if (t.finish) res.finishReason = t.finish;
+    if (chunk.usage && typeof chunk.usage === 'object') res.usage = chunk.usage;
+    if (chunk.error && !res.error) res.error = chunk.error;
+    if (chunk.model && !res.model) res.model = chunk.model;
+    if (chunk.id && !res.id) res.id = chunk.id;
+    res.chunks++;
+  };
+
+  if (isSseBody(body)) {
+    res.streamed = true;
+    const payloads = ssePayloads(body);
+    let parsed = 0;
+    for (let i = 0; i < payloads.length; i++) {
+      let j = null;
+      try { j = JSON.parse(payloads[i]); } catch (_) { continue; }
+      parsed++;
+      take(j);
+    }
+    res.shape = parsed > 0 ? 'sse' : 'sse-empty';
+    res.ok = parsed > 0;
+    return res;
+  }
+
+  let j = null;
+  try { j = JSON.parse(body); } catch (_) { return res; }
+  if (!j || typeof j !== 'object') return res;
+
+  take(j);
+  const objType = String(j.object || '');
+  if (objType.indexOf('chunk') >= 0) { res.shape = 'chunk'; res.ok = true; }
+  else if (Array.isArray(j.choices)) { res.shape = 'completion'; res.ok = true; }
+  else if (j.error) { res.shape = 'error'; }
+  else { res.shape = 'unknown'; }
+  return res;
+}
+
+/**
+ * 没有 usage 时的粗略 token 估算（中日韩字符按 1 token/字，其余按 4 字符/token）。
+ * 流式响应基本不回 usage，日志里空着不如给个量级——但调用方必须标成「估算」。
+ */
+function estimateTokens(text) {
+  const s = String(text == null ? '' : text);
+  if (!s) return 0;
+  let wide = 0;
+  for (let i = 0; i < s.length; i++) { if (s.charCodeAt(i) >= 0x2e80) wide++; }
+  const narrow = s.length - wide;
+  return Math.max(1, Math.round(wide + narrow / 4));
+}
+
 const Api = {
   /** 拉取可用模型列表 */
   async listModels(account, timeoutMs) {
@@ -523,7 +647,12 @@ const Api = {
     const url = apiUrl(account.baseUrl, '/v1/chat/completions');
     const payload = { model: model, messages: messages, stream: false };
     if (maxTokens) payload.max_tokens = maxTokens;
+    const req = { method: 'POST', url: url, model: model, timeoutMs: timeoutMs };
 
+    /* 这里刻意不写 Accept: text/event-stream —— 让上游优先给完整的非流式 JSON；
+       真遇上「不管不顾硬吐 SSE」的中转站，parseChatBody 会兜住。
+
+       有些中转站只认 stream:true，可以考虑加个开关；目前先用兼容性最好的写法。 */
     const r = await Net.request({
       url,
       method: 'POST',
@@ -543,42 +672,80 @@ const Api = {
         status: null,
         latencyMs: r.latencyMs,
         message: r.message,
-        request: { url: url, model: model, timeoutMs: timeoutMs },
+        request: req,
       };
     }
 
-    let json = null;
-    try { json = JSON.parse(r.body); } catch (_) {}
-
-    if (r.status !== 200 || !json) {
+    if (r.status !== 200) {
+      let j = null;
+      try { j = JSON.parse(r.body); } catch (_) {}
       return {
         ok: false,
         status: r.status,
         kind: r.kind,
         latencyMs: r.latencyMs,
-        message: errMessageOf(r, json),
+        message: errMessageOf(r, j),
         raw: r.body,
-        request: { url: url, model: model, timeoutMs: timeoutMs },
+        request: req,
       };
     }
 
-    const choice = (json.choices && json.choices[0]) || {};
-    const usage = json.usage || {};
-    const inTok = usage.prompt_tokens != null ? usage.prompt_tokens : null;
-    const outTok = usage.completion_tokens != null ? usage.completion_tokens : null;
-    const cost = (inTok == null && outTok == null) ? null : estimateCost(model, inTok, outTok);
+    const p = parseChatBody(r.body);
+
+    /* 有些中转站把错误塞进 HTTP 200 的流里，得单独挑出来 */
+    if (p.error) {
+      const em = typeof p.error === 'string'
+        ? p.error
+        : (p.error.message || JSON.stringify(p.error));
+      return {
+        ok: false, status: r.status, kind: 'upstream_error', latencyMs: r.latencyMs,
+        message: em, raw: r.body, streamed: p.streamed, shape: p.shape, request: req,
+      };
+    }
+
+    /* HTTP 通了，但返回的形状不属于任何一种对话结构 */
+    if (!p.ok) {
+      return {
+        ok: false, status: r.status, kind: 'parse', latencyMs: r.latencyMs,
+        message: p.streamed
+          ? '返回了流式数据，但里面没有可解析的对话分片'
+          : 'HTTP 200，但返回体不是可识别的对话结构',
+        raw: r.body, streamed: p.streamed, shape: p.shape, request: req,
+      };
+    }
+
+    const usage = p.usage || {};
+    const hasUsage = usage.prompt_tokens != null
+      || usage.completion_tokens != null
+      || usage.total_tokens != null;
+    let inTok = usage.prompt_tokens != null ? usage.prompt_tokens : null;
+    let outTok = usage.completion_tokens != null ? usage.completion_tokens : null;
+    const tokEstimated = !hasUsage;
+    if (tokEstimated) {
+      inTok = estimateTokens((messages || []).map((m) => String((m && m.content) || '')).join('\n'));
+      outTok = estimateTokens(p.text);
+    }
+    const totalTok = usage.total_tokens != null
+      ? usage.total_tokens
+      : ((inTok != null && outTok != null) ? inTok + outTok : null);
 
     return {
       ok: true,
       status: r.status,
       kind: 'ok',
       latencyMs: r.latencyMs,
-      text: (choice.message && choice.message.content) || '',
-      finishReason: choice.finish_reason || '',
-      inTok: inTok, outTok: outTok, totalTok: usage.total_tokens != null ? usage.total_tokens : null,
-      cost: cost,
+      text: p.text,
+      emptyText: !p.text,
+      reasoningLen: (p.reasoning || '').length,
+      streamed: p.streamed,
+      shape: p.shape,
+      chunks: p.chunks,
+      finishReason: p.finishReason || '',
+      inTok: inTok, outTok: outTok, totalTok: totalTok,
+      tokEstimated: tokEstimated,
+      cost: (inTok == null && outTok == null) ? null : estimateCost(model, inTok, outTok),
       hasPrice: !!priceOf(model),
-      request: { url: url, model: model, timeoutMs: timeoutMs },
+      request: req,
     };
   },
 
@@ -638,12 +805,21 @@ const FAIL_HINT = {
   network:        { tone: 'warn', title: '网络不通', msg: '请求没能发出去',                        todo: ['检查本机网络', '确认 BaseURL 域名可访问', '若用了代理软件，确认它放行该域名'] },
   cors:           { tone: 'warn', title: '浏览器拦截', msg: '跨域被拦，请求没发出去',              todo: ['用 npm start 以本地服务方式打开', 'APK 版本不受此限制'] },
   bad_request:    { tone: 'err',  title: '请求被拒绝', msg: '参数格式有问题',                      todo: ['检查模型名是否正确', '检查 max_tokens 等参数', '展开请求诊断看原始返回'] },
-  parse:          { tone: 'warn', title: '响应无法解析', msg: '返回的内容不是预期的 JSON',        todo: ['BaseURL 可能指向了一个非对话接口', '若是中转站，检查其兼容性'] },
+  parse:          { tone: 'warn', title: '响应认不出来', msg: 'HTTP 通了，但返回体不是任何一种已知的对话结构', todo: ['BaseURL 可能指向了非对话接口（模型列表 / 余额 / 网页）', '若是中转站，检查它是否改写了返回格式', '展开下面的请求诊断，看原始返回长什么样', '把诊断内容发出来，可以针对性适配这种格式'] },
   unsupported:    { tone: 'mute', title: '不支持自动查询', msg: '该平台没有公开的余额接口',        todo: ['手动填写余额并定期更新'] },
 };
 
+/* 兜底文案。注意 kind='ok' 也会走到这里 —— 那是「HTTP 200 但归类没跟上」，
+   必须给一句能解释清楚的话，不能甩一个空列表出去。 */
+const FALLBACK_HINT = {
+  tone: 'warn', title: '请求没走通',
+  msg: '请求已发出，但没能完成一次可用的对话',
+  todo: ['展开下面的请求诊断看原始返回', '确认模型名与 BaseURL 匹配', '换个模型再试一次'],
+};
+
 function failInfo(kind) {
-  return FAIL_HINT[kind] || { tone: 'err', title: '请求失败', msg: '未知错误', todo: [] };
+  if (kind && kind !== 'ok' && FAIL_HINT[kind]) return FAIL_HINT[kind];
+  return FALLBACK_HINT;
 }
 
 /* ---------------------------------------------------------------- UI 工具 */

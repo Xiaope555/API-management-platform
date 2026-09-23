@@ -18,7 +18,7 @@ const path = require('path');
 const ROOT = path.join(__dirname, 'www');
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT) || 8787;
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',

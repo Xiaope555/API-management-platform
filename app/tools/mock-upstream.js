@@ -11,7 +11,15 @@ const http = require('http');
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.MOCK_PORT) || 8899;
 
-const MODELS = ['mock-chat-mini', 'mock-chat-pro', 'mock-embed'];
+const MODELS = [
+  'mock-chat-mini',
+  'mock-chat-pro',
+  'mock-embed',
+  /* 下面三个专门用来复刻「不守规矩的中转站」——见 sse 相关分支 */
+  'mock-stream',
+  'mock-stream-empty',
+  'mock-stream-error',
+];
 
 function json(res, code, obj) {
   const body = JSON.stringify(obj);
@@ -20,6 +28,38 @@ function json(res, code, obj) {
     'Content-Length': Buffer.byteLength(body),
   });
   res.end(body);
+}
+
+/* --------------------------------------------------------------------------
+   流式（SSE）分支
+   真实的「免费/中转」上游里，相当一部分即使收到 stream:false 也会硬吐 SSE。
+   App 必须能认这种响应，否则会把 HTTP 200 的可用 Key 误判成失败。
+   -------------------------------------------------------------------------- */
+
+function sseHead(res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache',
+  });
+}
+
+function sseChunk(model, choice) {
+  return {
+    id: 'chatcmpl-mock-stream',
+    object: 'chat.completion.chunk',
+    created: Math.floor(Date.now() / 1000),
+    model: model,
+    choices: [Object.assign({ index: 0 }, choice || {})],
+  };
+}
+
+function sseSend(res, obj) {
+  res.write('data: ' + JSON.stringify(obj) + '\n\n');
+}
+
+function sseEnd(res) {
+  res.write('data: [DONE]\n\n');
+  res.end();
 }
 
 const server = http.createServer((req, res) => {
@@ -66,6 +106,34 @@ const server = http.createServer((req, res) => {
 
       const userMsg = ((body.messages || []).filter((m) => m.role === 'user').pop() || {}).content || '';
       const reply = '收到「' + String(userMsg).slice(0, 20) + '」。这是模拟上游返回的一句话，用于验证整条链路是否跑通。';
+
+      /* --- 不守规矩的流式分支：注意这里完全不看 body.stream --- */
+
+      if (body.model === 'mock-stream') {
+        sseHead(res);
+        sseSend(res, sseChunk(body.model, { delta: { role: 'assistant', content: '' } }));
+        ['收到「', String(userMsg).slice(0, 20), '」。', '这是流式分片拼出来的回复。'].forEach((seg) => {
+          sseSend(res, sseChunk(body.model, { delta: { content: seg } }));
+        });
+        sseSend(res, sseChunk(body.model, { delta: {}, finish_reason: 'stop' }));
+        return sseEnd(res);
+      }
+
+      if (body.model === 'mock-stream-empty') {
+        /* 只回推理内容、不给正文：验证「接口通但正文为空」这条路径 */
+        sseHead(res);
+        sseSend(res, sseChunk(body.model, { delta: { role: 'assistant', content: '' } }));
+        sseSend(res, sseChunk(body.model, { delta: { reasoning_content: '先在心里盘算一下……' } }));
+        sseSend(res, sseChunk(body.model, { delta: {}, finish_reason: 'stop' }));
+        return sseEnd(res);
+      }
+
+      if (body.model === 'mock-stream-error') {
+        /* HTTP 200，但错误藏在流里 */
+        sseHead(res);
+        sseSend(res, { error: { message: 'relay quota exhausted', type: 'insufficient_quota' } });
+        return sseEnd(res);
+      }
 
       return json(res, 200, {
         id: 'chatcmpl-mock-' + Date.now(),

@@ -268,33 +268,53 @@ Screens.verify = function (root) {
     const r = VS.last;
     const info = failInfo(r.kind);
     if (r.ok) {
+      const stats = [
+        (r.latencyMs / 1000).toFixed(2) + 's 耗时',
+        r.totalTok != null
+          ? (r.tokEstimated ? '≈' : '') + num(r.totalTok) + ' tokens' + (r.tokEstimated ? '（估）' : '')
+          : '无 usage 返回',
+        r.hasPrice ? (r.tokEstimated ? '≈' : '') + money(r.cost) + ' 估算' : '未知单价',
+        r.streamed ? '流式响应' + (r.chunks > 1 ? ' ×' + r.chunks : '') : '整体响应',
+      ];
+      if (r.finishReason) stats.push(esc(r.finishReason));
+
       html += '<div class="result ok"><div class="r-head">' + iconCheck() +
-        '<span class="r-title">验证通过 · 接口可用</span>' +
+        '<span class="r-title">' + (r.emptyText ? '接口连通 · 但没返回正文' : '验证通过 · 接口可用') + '</span>' +
         '<span class="r-code">HTTP ' + esc(r.status || 200) + '</span></div>' +
-        '<div class="r-stats">' +
-          '<span>' + (r.latencyMs / 1000).toFixed(2) + 's 耗时</span>' +
-          '<span>' + (r.totalTok != null ? num(r.totalTok) + ' tokens' : '无 usage 返回') + '</span>' +
-          '<span>' + (r.hasPrice ? money(r.cost) + ' 估算' : '未知单价') + '</span>' +
-        '</div></div>';
+        '<div class="r-stats">' + stats.map((s) => '<span>' + s + '</span>').join('') + '</div>';
+
+      if (r.emptyText) {
+        html += '<div class="r-msg">' +
+          (r.reasoningLen
+            ? '模型只吐了 ' + num(r.reasoningLen) + ' 字推理内容，没给最终正文。'
+            : '上游回了 200，但正文是空的。') +
+          '接口本身是通的 —— 这通常是这个模型在这家中转站上的输出习惯，换个模型或换个问法再试。</div>';
+      }
+      html += '</div>';
     } else {
       html += '<div class="result ' + (info.tone === 'mute' ? 'warn' : info.tone) + '"><div class="r-head">' + iconAlert() +
         '<span class="r-title">' + esc(info.title) + '</span>' +
-        '<span class="r-code">' + esc(r.status ? 'HTTP ' + r.status : (r.kind === 'timeout' ? 'TIMEOUT' : r.kind.toUpperCase())) + '</span></div>' +
+        '<span class="r-code">' + esc(r.status ? 'HTTP ' + r.status : (r.kind === 'timeout' ? 'TIMEOUT' : String(r.kind || '').toUpperCase())) + '</span></div>' +
         '<div class="r-msg">' + esc(r.message || info.msg) + '</div>' +
-        '<div class="r-stats"><span>' + (r.latencyMs / 1000).toFixed(2) + 's</span><span>' + esc(r.model || '') + '</span></div>' +
+        '<div class="r-stats"><span>' + (r.latencyMs / 1000).toFixed(2) + 's</span><span>' + esc(r.model || '') + '</span>' +
+          (r.streamed ? '<span>流式响应</span>' : '') + '</div>' +
         '</div>';
 
-      html += '<div class="section-title" style="margin-top:12px">可能的原因</div>';
-      html += '<div class="card flat plain stack gap-10" style="margin-top:8px">' +
-        info.todo.map((t, i) => '<div class="t-sm" style="line-height:1.6"><span class="c-3 mono">' + (i + 1) + '</span>&nbsp;&nbsp;' + esc(t) + '</div>').join('') +
-        '</div>';
+      /* todo 为空时不要留一个光秃秃的「可能的原因」标题 */
+      if (info.todo && info.todo.length) {
+        html += '<div class="section-title" style="margin-top:12px">可能的原因</div>';
+        html += '<div class="card flat plain stack gap-10" style="margin-top:8px">' +
+          info.todo.map((t, i) => '<div class="t-sm" style="line-height:1.6"><span class="c-3 mono">' + (i + 1) + '</span>&nbsp;&nbsp;' + esc(t) + '</div>').join('') +
+          '</div>';
+      }
 
       if (r.request) {
+        const raw = String(r.raw || r.message || '');
         html += '<div class="diag" style="margin-top:12px"><span class="d-title">请求诊断</span>' +
           esc(r.request.method || 'POST') + ' ' + esc(r.request.url || '') + '\n' +
           'model: ' + esc(r.request.model || '') + '\n' +
           'timeout: ' + Math.round((r.request.timeoutMs || 0) / 1000) + 's\n' +
-          '<span class="' + (r.kind === 'timeout' ? 'd-warn' : 'd-err') + '">← ' + esc(r.status ? 'HTTP ' + r.status + ' ' : '') + esc((r.raw || r.message || '').slice(0, 220)) + '</span>' +
+          '<span class="' + (info.tone === 'warn' ? 'd-warn' : 'd-err') + '">← ' + esc(r.status ? 'HTTP ' + r.status + ' ' : '') + esc(raw.slice(0, 220)) + (raw.length > 220 ? ' …' : '') + '</span>' +
           '</div>';
       }
     }

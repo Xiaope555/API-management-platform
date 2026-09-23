@@ -188,30 +188,35 @@ async function sendMessage(text) {
 
   if (r.ok) {
     const tokTxt = r.totalTok != null
-      ? num(r.totalTok) + ' tokens'
+      ? (r.tokEstimated ? '≈' : '') + num(r.totalTok) + ' tokens' + (r.tokEstimated ? '（估）' : '')
       : ((r.inTok != null || r.outTok != null) ? '入' + num(r.inTok) + '/出' + num(r.outTok) : '无 usage 返回');
     VS.messages.push({
       role: 'assistant',
-      content: r.text || '（接口返回了空内容，但这本身也是有效响应）',
+      content: r.text || (r.reasoningLen
+        ? '（这个模型只返回了推理内容，没有正文。接口本身是通的）'
+        : '（接口返回了空内容，但这本身也是有效响应）'),
       ok: true,
-      meta: 'HTTP ' + r.status + ' · ' + (r.latencyMs / 1000).toFixed(2) + 's · ' + tokTxt,
+      meta: 'HTTP ' + r.status + ' · ' + (r.latencyMs / 1000).toFixed(2) + 's · ' + tokTxt + (r.streamed ? ' · 流式' : ''),
     });
     VS.last = {
       ok: true, status: r.status, latencyMs: r.latencyMs,
       totalTok: r.totalTok, cost: r.cost, hasPrice: r.hasPrice, model: VS.model,
+      tokEstimated: r.tokEstimated, streamed: r.streamed, chunks: r.chunks,
+      emptyText: r.emptyText, reasoningLen: r.reasoningLen, finishReason: r.finishReason,
     };
     Store.addLog(Object.assign({}, base, {
       status: 'ok', code: r.status,
-      inTok: r.inTok, outTok: r.outTok,
-      latencyMs: r.latencyMs, costCNY: r.cost,
+      inTok: r.inTok, outTok: r.outTok, tokEstimated: r.tokEstimated,
+      latencyMs: r.latencyMs, costCNY: r.cost, streamed: r.streamed,
       preview: String(r.text || '').slice(0, 240),
     }));
-    UI.toast('接口可用 · ' + (r.latencyMs / 1000).toFixed(2) + 's', 'ok');
+    UI.toast(r.emptyText ? '接口连通，但没返回正文' : '接口可用 · ' + (r.latencyMs / 1000).toFixed(2) + 's', r.emptyText ? '' : 'ok');
   } else {
     const info = failInfo(r.kind);
     VS.last = {
       ok: false, kind: r.kind, status: r.status, latencyMs: r.latencyMs,
       message: r.message || info.msg, raw: r.raw, model: VS.model,
+      streamed: r.streamed,
       request: { method: 'POST', url: (r.request && r.request.url) || '', model: VS.model, timeoutMs: (r.request && r.request.timeoutMs) || s.timeoutMs },
     };
     Store.addLog(Object.assign({}, base, {
