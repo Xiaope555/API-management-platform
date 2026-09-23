@@ -527,6 +527,68 @@
     const firstLabel = document.querySelector('table.tbl tbody td[data-th]');
     ok('窄屏计算值：卡片视图把表头借 ::before 显示出来了',
       firstLabel && /attr\(data-th\)/.test(cssText), firstLabel ? firstLabel.getAttribute('data-th') : '');
+
+    /* --- 20.5 窄屏「几何」复核：导航必须真的够得着 ---
+       这是比计算值更狠的一层。外壳曾经用了 min-height 而不是 height，
+       内容一长，底部 Tab 就被推出视口（实测被推到 y≈2300）。
+       那时 display、DOM 全是对的，只有「它在不在视口内」这一条看得出来。
+       用户报告的「进了总览退不出去」就是它。 */
+    function r(sel) {
+      const el = document.querySelector(sel);
+      if (!el) return null;
+      const b = el.getBoundingClientRect();
+      return { top: Math.round(b.top), bottom: Math.round(b.bottom), h: Math.round(b.height) };
+    }
+    const vh = window.innerHeight;
+
+    go('logs');   // 日志页内容最长，最容易把导航推出去
+    await sleep(80);
+    const tab = r('#tabbar');
+    ok('窄屏几何：底部 Tab 钉在视口内，没有被内容推出屏幕外',
+      tab && tab.top < vh && tab.bottom <= vh + 1,
+      { top: tab && tab.top, bottom: tab && tab.bottom, vh: vh });
+    const nav2 = r('#nav');
+    ok('窄屏几何：顶栏钉在视口顶部，没有跟着内容滚走',
+      nav2 && nav2.top >= -1 && nav2.top <= 2, nav2 && nav2.top);
+    ok('窄屏几何：底部 Tab 的中心命中的是它自己（没被透明层挡住）',
+      (function () {
+        const el = document.querySelector('#tabbar [data-tab]');
+        if (!el) return false;
+        const b = el.getBoundingClientRect();
+        const top = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
+        return top === el || el.contains(top);
+      })(), '');
+    const view = document.querySelector('#view');
+    ok('窄屏几何：只有 #view 自己滚（内容超长时 clientHeight < scrollHeight）',
+      view.clientHeight < view.scrollHeight,
+      view.clientHeight + ' < ' + view.scrollHeight);
+
+    /* --- 20.6 窄屏几何：卡片里的「值」必须落在视口内 ---
+       `.tbl.wide { min-width: 900px }`（权重 (0,2,0)）曾盖过窄屏的
+       `.tbl { min-width: 0 }`（(0,1,0)），日志表在 390 视口下仍保持 ~870 宽，
+       td 里的值被 space-between 推到屏幕外，卡片只剩 ::before 的标签。 */
+    const cw = document.documentElement.clientWidth;
+    const cardTd = document.querySelector('table.tbl.wide tbody td[data-th]') ||
+                   document.querySelector('table.tbl tbody td[data-th]');
+    ok('窄屏几何：宽表单元格收敛到视口宽度内（min-width 已被清掉）',
+      cardTd && cardTd.clientWidth <= cw + 1,
+      { td: cardTd && cardTd.clientWidth, cw: cw });
+    if (cardTd) {
+      const rng = document.createRange();
+      rng.selectNodeContents(cardTd);
+      const cr = rng.getBoundingClientRect();
+      ok('窄屏几何：卡片里的值真的落在视口内（标签之外还能看见值）',
+        cr.left >= -1 && cr.right <= cw + 1 && cr.width > 0,
+        { left: Math.round(cr.left), right: Math.round(cr.right), cw: cw });
+    }
+
+    /* 回到总览再确认一遍 —— 用户报的就是这个页面 */
+    go('overview');
+    await sleep(80);
+    const tab2 = r('#tabbar');
+    ok('窄屏几何：总览页底部 Tab 同样够得着',
+      tab2 && tab2.top < vh && tab2.bottom <= vh + 1,
+      { top: tab2 && tab2.top, bottom: tab2 && tab2.bottom, vh: vh });
   } else {
     ok('窄屏计算值：当前视口不是窄屏，跳过（由 e2e-desktop 复核电脑端）', true, window.innerWidth);
   }

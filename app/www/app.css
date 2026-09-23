@@ -244,6 +244,14 @@ table { border-collapse: collapse; }
    ========================================================================== */
 
 @media (max-width: 899px) {
+  /* 手机端的外壳必须钉满一屏，只有 #view 自己滚 ——
+     否则内容一长，#nav 和 #tabbar 会被推出视口（实测底部 Tab 被推到 y≈2300，
+     用户根本够不着，就觉得「进了总览退不出去」）。
+     电脑端不这么干：那边靠 sticky 侧栏 + 整页滚动。 */
+  #shell { height: 100dvh; }
+  #stage { height: 100dvh; min-height: 0; overflow: hidden; }
+  #view { min-height: 0; }
+
   #sidebar {
     position: fixed; left: 0; top: 0; bottom: 0;
     transform: translateX(-100%);
@@ -441,7 +449,10 @@ button.lrow:hover { background: #FBFAF8; }
 
 @media (max-width: 899px) {
   .tbl-wrap { background: transparent; box-shadow: none; border-radius: 0; overflow: visible; }
-  .tbl { min-width: 0; }
+  /* 必须连同 .tbl.wide 一起清：桌面 .tbl.wide { min-width: 900px } 权重是 (0,2,0)，
+     只写 .tbl { min-width: 0 } (0,1,0) 压不过它，宽表在手机上会保持 ~870 宽，
+     td 里的值会被 space-between 推到视口外（卡片只见标签不见值） */
+  .tbl, .tbl.wide { min-width: 0; width: 100%; }
   .tbl thead { display: none; }
   .tbl, .tbl tbody, .tbl tr, .tbl td { display: block; width: 100%; }
   .tbl tbody tr {
