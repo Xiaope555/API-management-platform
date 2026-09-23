@@ -83,10 +83,14 @@ function renderSidebar() {
     (accounts.length
       ? '<button class="btn soft sm" data-refresh-all>刷新全部余额</button>'
       : '') +
+    '<button class="btn ghost sm" data-quit>退出程序</button>' +
     '<div class="sb-meter" style="margin-top:2px"><span>' + esc(modeText) + '</span><b>v' + esc(APP_VERSION) + '</b></div>';
 
   const rbtn = foot.querySelector('[data-refresh-all]');
   if (rbtn) rbtn.addEventListener('click', () => { closeDrawer(); refreshAllBalances(); });
+
+  const qbtn = foot.querySelector('[data-quit]');
+  if (qbtn) qbtn.addEventListener('click', () => { closeDrawer(); quitApp(); });
 }
 
 /* ---------- 顶部栏 ---------- */
@@ -366,7 +370,11 @@ function systemBack() {
     render();
     return 'home';
   }
-  if (Date.now() - lastBackAt < 2000) { exitApp(); return 'exit'; }
+  if (Date.now() - lastBackAt < 2000) {
+    if (exitApp()) return 'exit';            // APK：真退到桌面
+    try { history.go(-1); } catch (_) {}     // 网页版：等效于离开本应用
+    return 'exit';
+  }
   lastBackAt = Date.now();
   UI.toast('再按一次返回键退出');
   return 'confirm-exit';
@@ -376,9 +384,31 @@ function systemBack() {
 function exitApp() {
   try {
     const P = window.Capacitor && window.Capacitor.Plugins;
-    if (P && P.App && P.App.exitApp) { P.App.exitApp(); return; }
+    if (P && P.App && P.App.exitApp) { P.App.exitApp(); return true; }
   } catch (_) {}
-  try { history.go(-1); } catch (_) {}
+  return false;
+}
+
+/* 退出程序 —— 这个入口原来只藏在「设置」页最下面，用户根本找不到，
+   现在提到侧栏/抽屉底部，一进应用就看得见。
+   APK：关掉应用；网页版：停掉本地服务（网页随之失效）。 */
+function quitApp() {
+  const native = Net.mode() === 'native';
+  UI.confirmDialog(
+    '退出程序',
+    native
+      ? '应用会关掉。数据都留在本机，下次打开还在。'
+      : '本地服务会停掉，这个网页随即失效。下次要用再运行一遍启动脚本即可。',
+    () => {
+      if (native) {
+        if (!exitApp()) UI.toast('这台设备的系统不让网页自己退出，请按返回键或上滑回到桌面');
+        return;
+      }
+      try { fetch('/api/shutdown', { method: 'POST' }); } catch (_) {}
+      UI.toast('本地服务已停止，可以关掉这个页面了');
+    },
+    native ? '退出' : '停止服务'
+  );
 }
 
 /* ------------------------------------------------------------ 启动 */
@@ -412,6 +442,14 @@ function parseHash() {
     render();
     if (mode === 'direct') {
       setTimeout(() => UI.toast('当前是直连模式，跨域请求会被浏览器拦掉。请用桌面版启动脚本打开。', 'err'), 900);
+    }
+    /* 网页版以服务端报告的版本为准：这样「应用里显示的版本」永远等于「正在跑的服务版本」，
+       不用再靠人手去四个地方同步，也不会出现装新版看旧号的情况。 */
+    if (mode === 'proxy') {
+      fetch('/api/health', { cache: 'no-store' })
+        .then((r) => r.json())
+        .then((j) => { if (j && j.version && j.version !== APP_VERSION) { APP_VERSION = j.version; render(); } })
+        .catch(() => {});
     }
   });
 

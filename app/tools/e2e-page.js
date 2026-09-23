@@ -514,6 +514,20 @@
       naked.length ? naked.slice(0, 2).map((s) => s.trim().slice(-40)) : '所有 dvh 都有 vh 兜底');
   })();
 
+  /* --- 20.3b 界面显示的版本号必须等于正在跑的服务版本 ---
+     这里曾经硬编码 '1.2.0' 一直不跟着发版走，用户装了新版却看到旧号，
+     根本判断不出「我到底跑的是哪一版」。 */
+  let srvVer = '';
+  try { srvVer = (await (await fetch('/api/health', { cache: 'no-store' })).json()).version; } catch (_) {}
+  for (let i = 0; i < 20 && APP_VERSION !== srvVer; i++) await sleep(150);
+  ok('版本号：界面显示的版本 === 服务端正在跑的版本',
+    !!srvVer && APP_VERSION === srvVer, { ui: APP_VERSION, server: srvVer });
+  go('settings');
+  await sleep(60);
+  ok('版本号：设置页里显示的也是同一个版本',
+    document.querySelector('#view').textContent.indexOf('v' + srvVer) >= 0, srvVer);
+  go('overview');
+
   /* --- 20.4 窄屏「真实计算值」复核 ---
      光断言 DOM 里有没有元素是不够的：`#menu-btn` 曾经因为权重被 `.icon-btn`
      盖住，电脑端一直顶着一个无效汉堡，而 DOM 断言完全看不出来。
@@ -692,6 +706,22 @@
         document.body.classList.remove('nav-open');
         return open;
       })(), '');
+
+    /* --- 20.10 「退出程序」必须在导航里直接看得见 ---
+       它原来只藏在设置页最下面，用户找不到，反馈就是「没找到退出的地方」。 */
+    const quitBtn = document.querySelector('#sb-foot [data-quit]');
+    ok('导航：侧栏/抽屉底部有「退出程序」入口',
+      !!quitBtn && /退出程序/.test(quitBtn.textContent), quitBtn && quitBtn.textContent.trim());
+    if (quitBtn) {
+      quitBtn.click();
+      await sleep(80);
+      const t = (document.querySelector('#sheet-root .sh-title') || {}).textContent || '';
+      ok('导航：点「退出程序」会先弹确认框（不会直接退）', /退出程序/.test(t), t);
+      UI.closeSheet(true);        // 只验证弹框，不点确认 —— 否则会把跑测试的服务关掉
+      await sleep(60);
+    }
+    ok('导航：按钮在可视区内（抽屉底部不会溢出屏幕）',
+      !!quitBtn && quitBtn.getBoundingClientRect().width > 0, quitBtn && Math.round(quitBtn.getBoundingClientRect().width));
     go('overview');
     await sleep(60);
   } else {
