@@ -1,0 +1,19 @@
+# 本地构建工具链（约 1.6GB：JDK 21 + Android SDK + Gradle），不进仓库
+.toolchain/
+
+# 智能助手的工作状态
+.workbuddy/
+
+# 依赖与构建产物
+node_modules/
+**/build/
+**/.gradle/
+app/android/local.properties
+app/android/app/src/main/assets/public/
+app/android/app/src/main/assets/capacitor.config.json
+app/android/app/src/main/assets/capacitor.plugins.json
+app/android/capacitor-cordova-android-plugins/
+
+# 临时文件
+_*.txt
+_*.log

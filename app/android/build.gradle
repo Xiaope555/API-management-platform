@@ -1,0 +1,48 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+
+// ---------------------------------------------------------------------------
+// 依赖仓库
+//
+// 直连 Maven Central 在国内实测只有约 0.2MB/分钟，Android 依赖根本拉不完。
+// 打开 gradle.properties 里的 useAliyunMirrors 时，优先走阿里云镜像
+// （实测约 1.4MB/秒），官方源依然排在后面兜底。
+// 想完全走官方源：把 android/gradle.properties 里的 useAliyunMirrors 改成 false。
+// ---------------------------------------------------------------------------
+
+buildscript {
+    repositories {
+        // 注意：buildscript 块先于脚本体执行，这里只能用 project 现取属性，
+        // 不要引用脚本顶层的 def 变量。
+        if (project.hasProperty('useAliyunMirrors') && project.property('useAliyunMirrors').toString() != 'false') {
+            maven { url 'https://maven.aliyun.com/repository/google' }
+            maven { url 'https://maven.aliyun.com/repository/public' }
+            maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        }
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.13.0'
+        classpath 'com.google.gms:google-services:4.4.4'
+
+        // NOTE: Do not place your application dependencies here; they belong
+        // in the individual module build.gradle files
+    }
+}
+
+apply from: "variables.gradle"
+
+allprojects {
+    repositories {
+        if (project.hasProperty('useAliyunMirrors') && project.property('useAliyunMirrors').toString() != 'false') {
+            maven { url 'https://maven.aliyun.com/repository/google' }
+            maven { url 'https://maven.aliyun.com/repository/public' }
+        }
+        google()
+        mavenCentral()
+    }
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}
