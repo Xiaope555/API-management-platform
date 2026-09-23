@@ -172,11 +172,15 @@ Screens.overview = function (root) {
     { key: 'auto', label: '可自动读取 ' + autoable },
     { key: 'missing', label: '待读取 ' + missing },
   ];
+  const checkinable = accounts.filter((a) => canCheckin(Store.platform(a.platformId))).length;
   html += '<div class="row between" style="margin-top:16px;gap:14px;flex-wrap:wrap">' +
     '<div class="chips">' + filters.map((f) =>
       '<button class="chip' + (OverviewFilter.key === f.key ? ' on' : '') + '" data-filter="' + f.key + '">' + esc(f.label) + '</button>'
     ).join('') + '</div>' +
-    '<button class="btn ghost sm" data-refresh-all>刷新全部余额</button></div>';
+    '<div class="row" style="gap:8px">' +
+      (checkinable ? '<button class="btn ghost sm" data-checkin-all>一键签到 ' + checkinable + '</button>' : '') +
+      '<button class="btn ghost sm" data-refresh-all>刷新全部余额</button>' +
+    '</div></div>';
 
   /* ---------- 平台分组 ---------- */
   const expanded = Screens.overview._expanded || (Screens.overview._expanded = {});
@@ -283,6 +287,8 @@ Screens.overview = function (root) {
   }));
   const rall = root.querySelector('[data-refresh-all]');
   if (rall) rall.addEventListener('click', refreshAllBalances);
+  const call = root.querySelector('[data-checkin-all]');
+  if (call) call.addEventListener('click', () => checkinAllNow(call));
 
   /* 横幅上的一键清除 */
   const cdemo = root.querySelector('[data-cleardemo]');
@@ -936,6 +942,26 @@ Screens.account = function (root, ctx) {
     (cred.lastError ? '<div class="t-xs c-rose" style="margin-top:8px;line-height:1.7">上次读取失败：' + esc(cred.lastError) + '</div>' : '') +
     '</div>';
 
+  /* 每日签到（只有中转站面板类账号可能有；官方平台没有这回事） */
+  if (canCheckin(Store.platform(a.platformId))) {
+    const ck = a.checkinLast || null;
+    const doneToday = a.checkinDay === Checkin.todayKey();
+    left += '<div class="card">' +
+      '<div class="row between self-start">' +
+        '<span class="stack gap-6 self-start">' +
+          '<span class="t-xs c-3">每日签到</span>' +
+          '<span class="t-sm w-600">' + (doneToday ? '今天已签到' : '今天还没签') + '</span>' +
+          (ck ? '<span class="t-xs ' + (ck.ok ? 'c-3' : 'c-rose') + '" style="line-height:1.7">' +
+                '上次：' + esc(ck.message || (ck.ok ? '成功' : '失败')) + '</span>' : '') +
+        '</span>' +
+        '<button class="btn ' + (doneToday ? 'ghost' : 'primary') + ' sm" data-checkin>' + (doneToday ? '再签一次' : '签到') + '</button>' +
+      '</div>' +
+      '<div class="t-xs c-4" style="margin-top:10px;line-height:1.7">' +
+        (doneToday && a.checkinAt ? '签到于 ' + esc(new Date(a.checkinAt).toLocaleTimeString()) + '。' : '') +
+        '能不能签由站点决定：没有开放签到接口的站点会明确提示，不会假装成功。</div>' +
+      '</div>';
+  }
+
   /* 统计条 */
   left += '<div class="card flat plain">' +
     '<div class="row between"><span class="t-xs c-3">本机记录调用</span>' +
@@ -1074,6 +1100,9 @@ Screens.account = function (root, ctx) {
   if (mBtn) mBtn.addEventListener('click', () => pullModels(a));
   const eBtn = root.querySelector('[data-a-edit]');
   if (eBtn) eBtn.addEventListener('click', () => go('add', null, a.id));
+
+  const ckBtn = root.querySelector('[data-checkin]');
+  if (ckBtn) ckBtn.addEventListener('click', () => checkinOne(a.id, ckBtn));
 };
 
 function rowAction(title, sub, kind, accent) {

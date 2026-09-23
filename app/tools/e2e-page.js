@@ -446,6 +446,82 @@
   ok('UI：不支持的平台说明「没有开放余额查询接口」', dv2.indexOf('没有开放余额查询接口') >= 0, '');
 
   /* ===================================================================
+     19B. 自动签到（中转站面板）
+     签到只存在于 new-api 系面板；官方平台没有这回事。
+     覆盖：能力判定、缺凭据、token 签到、本地幂等、站点「已签」、
+           批量汇总、无签到接口的站点明确报 not_supported。
+     =================================================================== */
+
+  ok('签到：官方平台（DeepSeek）没有签到能力', !canCheckin(Store.platform('deepseek')), '');
+  ok('签到：中转站平台有签到能力', canCheckin(Store.platform('custom')), '');
+
+  /* 21.1 没留凭据 → 明确要登录，而不是闷头失败 */
+  const aCk0 = mk('custom', 'http://127.0.0.1:8899');
+  const cNoCred = await Checkin.checkin(Store.account(aCk0.id));
+  ok('签到：没留凭据时明确提示要登录面板', cNoCred.ok === false && cNoCred.kind === 'need_login', cNoCred.kind);
+
+  /* 21.2 面板登录拿到 token → 签到成功，账号上留下幂等键 */
+  const aCk = mk('custom', 'http://127.0.0.1:8899');
+  const qCk = await Balance.query(Store.account(aCk.id), P_CUSTOM, { username: 'demo', password: 'demo123' });
+  Balance.applyResult(aCk.id, qCk, { username: 'demo', password: 'demo123' });   // 把 token 落到凭据里
+  ok('签到：前置——面板登录成功拿到 token', qCk.ok === true, qCk.kind);
+  const ck1 = await Checkin.checkin(Store.account(aCk.id));
+  ok('签到：第一次签到成功（走的 check_in 路径）',
+    ck1.ok === true && ck1.kind === 'ok' && ck1.via === '/api/user/check_in', ck1);
+  Checkin.applyCheckin(aCk.id, ck1);
+  const aCkAfter = Store.account(aCk.id);
+  ok('签到：签到后账号上留下了今天的幂等键',
+    aCkAfter.checkinDay === Checkin.todayKey() && !!aCkAfter.checkinLast, aCkAfter.checkinDay);
+
+  /* 21.3 本地幂等：同一天再签，不再去打站点 */
+  const ck2 = await Checkin.checkin(Store.account(aCk.id));
+  ok('签到：同一天再签被本地跳过（already_today）',
+    ck2.ok === true && ck2.kind === 'already_today' && ck2.via === 'local', ck2);
+
+  /* 21.4 强制绕过本地幂等 → 站点回「已经签到」，也算成功 */
+  const ck3 = await Checkin.checkin(Store.account(aCk.id), { force: true });
+  ok('签到：绕过本地幂等后，站点说「已经签过」也按成功算',
+    ck3.ok === true && ck3.kind === 'already', ck3.kind + ' / ' + ck3.message);
+
+  /* 21.5 站点把签到挂在 sign_in 路径 → 候选路径要能回退 */
+  const aSign = mk('custom', 'http://127.0.0.1:8899/signin');
+  const qSign = await Balance.query(Store.account(aSign.id), P_CUSTOM, { username: 'demo', password: 'demo123' });
+  Balance.applyResult(aSign.id, qSign, { username: 'demo', password: 'demo123' });
+  const ck4 = await Checkin.checkin(Store.account(aSign.id));
+  ok('签到：签到接口在 sign_in 路径的站点也能签上（候选路径回退生效）',
+    ck4.ok === true && ck4.via === '/api/user/sign_in', ck4.via);
+
+  /* 21.6 压根没有签到接口的站点 → 明确报 not_supported，绝不假装成功 */
+  const aNone = mk('custom', 'http://127.0.0.1:8899/nocheckin');
+  const qNone = await Balance.query(Store.account(aNone.id), P_CUSTOM, { username: 'demo', password: 'demo123' });
+  Balance.applyResult(aNone.id, qNone, { username: 'demo', password: 'demo123' });
+  const ck5 = await Checkin.checkin(Store.account(aNone.id));
+  ok('签到：没有签到接口的站点明确报 not_supported',
+    ck5.ok === false && ck5.kind === 'not_supported', ck5.kind);
+  ok('签到：not_supported 有对应的界面文案',
+    !!FAIL_HINT.not_supported && FAIL_HINT.not_supported.title.length > 0, FAIL_HINT.not_supported && FAIL_HINT.not_supported.title);
+
+  /* 21.7 批量签到 + 汇总口径 */
+  const ckBatch = await Checkin.checkinAll([
+    { account: Store.account(aCk.id),   platform: Store.platform('custom') },  // 本地已签 → already_today
+    { account: Store.account(aNone.id), platform: Store.platform('custom') },  // 站点没有签到接口
+    { account: Store.account(aSign.id), platform: Store.platform('custom') },  // 本地已签（21.5 签过）→ already_today
+  ]);
+  const ckSum = Checkin.summarize(ckBatch);
+  ok('签到：批量签到跑完整批（3 个可签账号）', ckBatch.length === 3, ckBatch.length);
+  ok('签到：批量里本地已签的账号被跳过', ckBatch[0].result.kind === 'already_today', ckBatch[0].result.kind);
+  ok('签到：批量里没有签到接口的账号如实报失败', ckBatch[1].result.kind === 'not_supported', ckBatch[1].result.kind);
+  ok('签到：汇总口径正确（成功 0 · 已签 2 · 失败 1）',
+    ckSum.ok === 0 && ckSum.already === 2 && ckSum.failed === 1, ckSum);
+
+  /* 21.8 签到状态留在账号上，详情页有依据显示「今天已签到」。
+     注意 checkinLast 记的是「最近一次尝试」—— 批量里该账号被本地幂等跳过，
+     所以 kind 是 already_today 而不是 ok，这本身就是正确行为。 */
+  const ckState = Store.account(aSign.id).checkinLast;
+  ok('签到：账号上留下了上次签到状态（成功类）',
+    !!ckState && ckState.ok === true && ckState.at > 0, ckState && ckState.kind);
+
+  /* ===================================================================
      20. 电脑端布局
      宽屏是左侧固定导航 + 表格；窄屏靠同一份 DOM 加 CSS 降级成卡片。
      =================================================================== */

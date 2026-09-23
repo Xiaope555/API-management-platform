@@ -5,10 +5,12 @@
      2. 各家官方余额接口（DeepSeek / Moonshot / 硅基流动 / OpenRouter）
      3. New API / One API 系中转站面板（/api/status、/api/user/login、/api/user/self）
 
-   面板有三种形态，各自挂在不同的路径前缀下，用来覆盖不同站点的配置：
+   面板有五种形态，各自挂在不同的路径前缀下，用来覆盖不同站点的配置：
      /            普通面板：无验证码、密码明文提交
      /turnstile   开了 Cloudflare 人机验证 → 脚本登录必须失败
      /enc         开启密码加密 → 必须用 RSA-OAEP 提交，且本进程会用真私钥验签
+     /signin      签到接口挂在 /api/user/sign_in（候选路径回退）
+     /nocheckin   压根没有签到接口 → 签到必须明确报 not_supported
 
    用法：node tools/mock-upstream.js   （默认 127.0.0.1:8899）
    ========================================================================== */
@@ -44,7 +46,14 @@ const PANELS = {
   '':           { turnstile: false, encryption: false, user: 'demo', pass: 'demo123' },
   '/turnstile': { turnstile: true,  encryption: false, user: 'demo', pass: 'demo123' },
   '/enc':       { turnstile: false, encryption: true,  user: 'demo', pass: 'demo123' },
+  /* 签到接口挂在 sign_in 而不是 check_in —— 覆盖「候选路径要挨个试」这条逻辑 */
+  '/signin':    { turnstile: false, encryption: false, user: 'demo', pass: 'demo123', signinOnly: true },
+  /* 压根没有签到接口的面板 —— 签到必须明确报 not_supported，不能假装成功 */
+  '/nocheckin': { turnstile: false, encryption: false, user: 'demo', pass: 'demo123', nocheckin: true },
 };
+
+/* 各面板「今天已签到」的状态。key = 面板前缀 —— 同一份 token 在不同面板互不影响 */
+const SIGNED_TODAY = {};
 
 /* 真生成一对 RSA 密钥：公钥下发给客户端做 RSA-OAEP 加密，私钥用来解密。
    这样一来「前端加密是否真的对」不是靠猜，而是靠真解一遍来证明。 */
@@ -69,7 +78,10 @@ function selfUser() {
 /* 面板只认这几个具体路径。
    注意不能用「以 /api/ 开头」来判断 —— OpenRouter 的 /api/v1/key 也是 /api/ 开头，
    那样会被面板分支吞掉，官方余额查询就永远测不到了。 */
-const PANEL_PATHS = ['/api/status', '/api/user/login', '/api/user/login/encryption-key', '/api/user/self'];
+const PANEL_PATHS = [
+  '/api/status', '/api/user/login', '/api/user/login/encryption-key', '/api/user/self',
+  '/api/user/check_in', '/api/user/sign_in',
+];
 
 function panelOf(url) {
   const prefixes = Object.keys(PANELS);
@@ -153,6 +165,29 @@ function handlePanel(prefix, url, req, res, rawBody) {
       return json(res, 401, { success: false, message: '未登录或登录状态已过期' });
     }
     return json(res, 200, { success: true, message: '', data: selfUser() });
+  }
+
+  /* 签到：每天一次；同一天重复签返回「已经签到」而不是成功 —— 和真站点一个脾气 */
+  if (req.method === 'POST' && (sub === '/api/user/check_in' || sub === '/api/user/sign_in')) {
+    if (rec.nocheckin) {
+      return json(res, 404, { success: false, message: 'no such panel route: ' + sub });
+    }
+    if (rec.signinOnly && sub === '/api/user/check_in') {
+      return json(res, 404, { success: false, message: 'no such panel route: ' + sub });
+    }
+    const auth = String(req.headers.authorization || '');
+    if (auth !== 'Bearer ' + PANEL_TOKEN) {
+      return json(res, 401, { success: false, message: '无权进行此操作，未登录或登录已过期' });
+    }
+    if (SIGNED_TODAY[prefix]) {
+      return json(res, 200, { success: false, message: '今天已经签到过了，明天再来' });
+    }
+    SIGNED_TODAY[prefix] = true;
+    return json(res, 200, {
+      success: true,
+      message: '签到成功',
+      data: { quota: 50000 },        // 奖励 50000 quota（≈$0.1）
+    });
   }
 
   return json(res, 404, { success: false, message: 'no such panel route: ' + sub });

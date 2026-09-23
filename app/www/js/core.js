@@ -10,7 +10,7 @@
 /* 版本号显示。APK 里用这个常量（跟随构建更新）；网页版启动后会被服务端
    /api/health 报告的版本覆盖（见 main.js 的 boot）—— 因为这里曾经硬编码成
    1.2.0 一直没跟着发版更新，用户装了新版本却看到旧号，根本分不清有没有生效。 */
-let APP_VERSION = '1.2.5';
+let APP_VERSION = '1.3.0';
 const STORE_KEY = 'aihub.v1';
 const LOG_LIMIT = 500;
 
@@ -32,7 +32,7 @@ const PRESET_PLATFORMS = [
   { id: 'openrouter',  name: 'OpenRouter',  color: '#6467F2', baseUrl: 'https://openrouter.ai/api/v1',         balanceKind: 'openrouter',  doc: 'https://openrouter.ai/settings/keys' },
   { id: 'zhipu',       name: '智谱 GLM',     color: '#2E5BFF', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', balanceKind: 'manual',      doc: 'https://open.bigmodel.cn/usercenter/apikeys' },
   { id: 'dashscope',   name: '阿里通义',     color: '#615CED', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', balanceKind: 'manual', doc: 'https://bailian.console.aliyun.com/' },
-  { id: 'custom',      name: '中转站 / 自定义', color: '#6BA8A0', baseUrl: '',                                  balanceKind: 'panel',       doc: '' },
+  { id: 'custom',      name: '中转站 / 自定义', color: '#6BA8A0', baseUrl: '',                                  balanceKind: 'panel',       checkinKind: 'panel', doc: '' },
 ];
 
 /** 平台 id → 余额读取方式。给没有 balanceKind 的旧数据兜底 */
@@ -53,6 +53,20 @@ function balanceKindOf(plat) {
 /** 能不能自动读余额（手动类不能） */
 function canAutoBalance(plat) {
   return balanceKindOf(plat) !== 'manual';
+}
+
+/** 平台的签到能力：只有 new-api 系的中转站面板可能有签到，官方平台没有这回事。
+    用户自己添加的中转站（pf_ 开头）也默认按面板对待 —— 到底有没有签到接口，
+    签到时探测一下就知道，探不到会明确报「该站点没有开放签到接口」。 */
+function checkinKindOf(plat) {
+  const p = plat || {};
+  if (p.checkinKind != null) return p.checkinKind;
+  if (p.id === 'custom' || String(p.id).indexOf('pf_') === 0 || balanceKindOf(p) === 'panel') return 'panel';
+  return '';
+}
+
+function canCheckin(plat) {
+  return checkinKindOf(plat) === 'panel';
 }
 
 const BALANCE_KIND_LABEL = {
@@ -1438,7 +1452,173 @@ const Balance = (function () {
     query, applyResult, refreshAll,
     panelStatus, panelLogin, panelSelf,
     encryptPanelPassword, siteRoot, withScheme,
+    /* 签到模块（Checkin）要复用的内部件 */
+    normalizeCred, numOf, panelErrMessage,
     PROVIDERS: OFFICIAL,
+  };
+})();
+
+/* ==========================================================================
+   自动签到（中转站面板）
+   签到只存在于 new-api 系的中转站面板 —— 官方平台没有这回事，直接如实告知。
+   各分站的签到接口路径不统一，所以按候选列表挨个探测；全都 404 就明确说
+   「该站点没有开放签到接口」，绝不假装成功。
+   凭据与余额共用一套：优先 token，没有就用账号密码登录换 token。
+   ========================================================================== */
+
+const CHECKIN_TIMEOUT = 12000;
+const CHECKIN_PATHS = ['/api/user/check_in', '/api/user/sign_in'];
+
+/** 本地日期键（按设备时区）。签到是「每天一次」，幂等判断用它 */
+function todayKey(ts) {
+  const d = new Date(ts == null ? Date.now() : ts);
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return d.getFullYear() + '-' + m + '-' + day;
+}
+
+const Checkin = (function () {
+
+  /**
+   * 给一个账号签到。
+   * 返回 { ok, kind, message, via?, rewardQuota? }
+   * kind: ok / already / already_today / not_supported / need_login /
+   *       turnstile / auth_invalid / token_expired / bad_request / network / timeout / cors
+   */
+  async function checkin(account, opts) {
+    const o = opts || {};
+    const rawBase = account.baseUrl;
+    if (!Balance.withScheme(rawBase)) return { ok: false, kind: 'bad_request', message: '这个账号还没填 BaseURL，没法定位面板' };
+
+    /* 本地幂等：今天已经签过就不再去打站点（批量签到时省时间，也少骚扰站点） */
+    if (!o.force && account.checkinDay === todayKey()) {
+      return { ok: true, kind: 'already_today', via: 'local', message: '今天已经签过到了' };
+    }
+
+    const cred = Balance.normalizeCred(account.cred);
+    const username = (o.username != null ? o.username : (cred && cred.username)) || '';
+    const password = (o.password != null ? o.password : (cred && cred.password)) || '';
+    let token = (o.token != null ? o.token : (cred && cred.token)) || '';
+    let root = Balance.siteRoot(Balance.withScheme(rawBase));
+
+    /* 先验证手上的 token 还活着（顺带把过期的清掉） */
+    if (token) {
+      const self = await Balance.panelSelf(rawBase, token);
+      if (!self.ok) {
+        if (self.kind === 'token_expired' && username && password) { token = ''; }
+        else {
+          return { ok: false, kind: self.kind,
+                   message: self.kind === 'token_expired'
+                     ? '这个站点上次登录的凭据已经失效，需要重新登录一次才能签到'
+                     : (self.message || '连不上面板') };
+        }
+      }
+    }
+
+    /* 没有 token → 用账号密码登录换一个（与余额查询同一套逻辑） */
+    if (!token) {
+      if (!username || !password) {
+        return { ok: false, kind: 'need_login', root: root,
+                 message: '这个站点要签到得先登录面板：请在该账号里填入面板的账号密码（或粘 access token）' };
+      }
+      const login = await Balance.panelLogin(rawBase, username, password);
+      if (!login.ok) return login;
+      token = login.token;
+      root = login.root;
+    }
+
+    /* 候选接口挨个试：new-api 用 check_in，部分分站用 sign_in */
+    let saw404 = false;
+    for (const path of CHECKIN_PATHS) {
+      const r = await Net.request({
+        url: root + path, method: 'POST',
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: {}, timeoutMs: CHECKIN_TIMEOUT,
+      });
+      if (!r.ok) return { ok: false, kind: r.kind, message: r.message };
+
+      if (r.status === 404) { saw404 = true; continue; }   /* 这个路径没有 → 换下一个候选 */
+      if (r.status === 401 || r.status === 403) {
+        return { ok: false, kind: 'auth_invalid', httpStatus: r.status, raw: r.body,
+                 message: '签到接口拒绝了这份登录凭据（' + r.status + '）。去账号详情重新登录一次面板试试' };
+      }
+
+      let j = null;
+      try { j = JSON.parse(r.body); } catch (_) {}
+      if (j && j.success === true) {
+        const d = j.data || {};
+        const reward = Balance.numOf(d.quota != null ? d.quota : d.reward);
+        return { ok: true, kind: 'ok', via: path, raw: r.body,
+                 rewardQuota: reward != null ? reward : null,
+                 message: '签到成功' };
+      }
+      const msg = Balance.panelErrMessage(j, r) || '';
+      if (/已经|已签|重复|已领取|already/i.test(msg)) {
+        return { ok: true, kind: 'already', via: path, raw: r.body, message: '今天已经签过到了（' + msg + '）' };
+      }
+      return { ok: false, kind: 'upstream_error', httpStatus: r.status, raw: r.body,
+               message: msg || ('站点对 ' + path + ' 返回了失败（' + r.status + '）') };
+    }
+
+    if (saw404) {
+      return { ok: false, kind: 'not_supported',
+               message: '这个站点没有开放签到接口（候选路径都是 404）：它大概率没有签到功能，或不是 new-api 系面板' };
+    }
+    return { ok: false, kind: 'parse', message: '站点返回了认不得的签到结果' };
+  }
+
+  /** 把签到结果写回账号：状态、时间、今天的幂等键；鉴权失败顺带清掉失效 token */
+  function applyCheckin(accountId, r) {
+    const patch = {
+      checkinLast: { ok: !!r.ok, kind: r.kind, message: r.message || '', at: Date.now() },
+    };
+    if (r.ok) {
+      patch.checkinAt = Date.now();
+      patch.checkinDay = todayKey();
+    }
+    Store.updateAccount(accountId, patch);
+    if (!r.ok && (r.kind === 'auth_invalid' || r.kind === 'token_expired')) {
+      Store.setCred(accountId, { lastError: r.message || '' });
+      if (r.kind === 'token_expired') Store.setCred(accountId, { token: '' });
+    }
+    return r;
+  }
+
+  /** 批量签到：并发 2（签到是轻请求，但也没必要打爆站点）。
+      list 的形状与 Balance.refreshAll 一致：[{ account, platform }] */
+  async function checkinAll(list, onEach) {
+    const items = (list || []).filter((it) => canCheckin(it.platform));
+    const out = [];
+    let cursor = 0;
+    async function worker() {
+      while (cursor < items.length) {
+        const it = items[cursor++];
+        let res;
+        try { res = await checkin(it.account, it.opts); }
+        catch (e) { res = { ok: false, kind: 'network', message: String((e && e.message) || e) }; }
+        applyCheckin(it.account.id, res);
+        out.push({ id: it.account.id, result: res });
+        if (onEach) onEach(it.account, res);
+      }
+    }
+    await Promise.all([worker(), worker()]);
+    return out;
+  }
+
+  /** 汇总批量结果，给界面一句话 */
+  function summarize(results) {
+    let ok = 0, already = 0, failed = 0;
+    (results || []).forEach(({ result }) => {
+      if (result.ok && result.kind === 'ok') ok++;
+      else if (result.ok) already++;       /* already / already_today */
+      else failed++;
+    });
+    return { ok: ok, already: already, failed: failed, total: (results || []).length };
+  }
+
+  return {
+    checkin, checkinAll, applyCheckin, summarize,
+    todayKey, PATHS: CHECKIN_PATHS,
   };
 })();
 
@@ -1462,6 +1642,7 @@ const FAIL_HINT = {
   token_rejected: { tone: 'err',  title: '登录凭据被拒绝', msg: '站点不认这个 access token',        todo: ['确认这个 token 是该站点签发的', '重新登录一次拿新的 token'] },
   not_panel:      { tone: 'warn', title: '不是面板站点', msg: '这个地址上没有 /api/status',        todo: ['确认 BaseURL 指向的是中转站面板', '官方平台（DeepSeek 等）用的是 API Key 直查，不需要登录'] },
   crypto:         { tone: 'err',  title: '密码加密失败', msg: '站点要求加密密码，但当前环境做不了加密', todo: ['改用 http://127.0.0.1 打开网页版（WebCrypto 需要安全上下文）', '或者换成 APK 版本', '也可以手动填余额'] },
+  not_supported:  { tone: 'mute', title: '该站点没有签到功能', msg: '签到接口在站点上不存在（404）', todo: ['这个站点大概率不是 new-api 系面板，或没开签到', '官方平台（OpenAI / DeepSeek 等）本来就没有签到', '不用管它，签到时会被自动跳过'] },
 };
 
 /* 兜底文案。注意 kind='ok' 也会走到这里 —— 那是「HTTP 200 但归类没跟上」，

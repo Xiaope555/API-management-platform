@@ -324,6 +324,58 @@ async function refreshAllBalances() {
   render();
 }
 
+/* ------------------------------------------------------------ 自动签到 */
+
+let checkinBusy = false;
+
+/**
+ * 一键批量签到所有「中转站面板」类账号。
+ * 官方平台没有签到这回事，会被直接排除；今天已签的账号本地跳过，不重复打扰站点。
+ * 失败的账号不打断整批 —— 原因写在各自的 checkinLast 里，详情页能看。
+ */
+async function checkinAllNow(btn) {
+  if (checkinBusy) { UI.toast('签到还在进行中…'); return; }
+  const items = Store.accounts().map((a) => ({ account: a, platform: Store.platform(a.platformId) }))
+    .filter((it) => canCheckin(it.platform));
+
+  if (!items.length) {
+    UI.toast('当前没有可签到的中转站账号（官方平台没有签到功能）');
+    return;
+  }
+
+  checkinBusy = true;
+  if (btn) { btn.textContent = '签到中…'; btn.disabled = true; }
+  UI.toast('正在给 ' + items.length + ' 个中转站账号签到…');
+
+  const results = await Checkin.checkinAll(items);
+  checkinBusy = false;
+  if (btn) { btn.disabled = false; btn.textContent = '一键签到'; }
+
+  const s = Checkin.summarize(results);
+  UI.toast('签到完成：成功 ' + s.ok + ' · 今天已签 ' + s.already + ' · 失败 ' + s.failed +
+    '（共 ' + s.total + ' 个可签账号）', s.failed ? '' : 'ok');
+  render();
+}
+
+/** 单个账号签到（账号详情页用） */
+async function checkinOne(id, btn) {
+  if (checkinBusy) { UI.toast('签到还在进行中…'); return; }
+  const a = Store.account(id);
+  if (!a) return;
+  checkinBusy = true;
+  if (btn) { btn.textContent = '签到中…'; btn.disabled = true; }
+  const r = await Checkin.checkin(a);
+  Checkin.applyCheckin(id, r);
+  checkinBusy = false;
+  if (btn) { btn.disabled = false; btn.textContent = '签到'; }
+  if (r.ok) UI.toast(r.message, 'ok');
+  else {
+    const info = FAIL_HINT[r.kind];
+    UI.toast((info ? info.title + '：' : '') + (r.message || '签到没成功'), r.kind === 'not_supported' ? '' : 'err');
+  }
+  render();
+}
+
 /* ------------------------------------------------------------ 导航 */
 
 /* 每一层页面都推进一条浏览器历史 —— 手机上的系统返回键、侧滑返回、
