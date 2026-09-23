@@ -121,6 +121,14 @@ npm run apk          # 产物 → android/app/build/outputs/apk/debug/app-debug.
 | 账号/日志列表 | 表格 | 表格降级成卡片，表头借 `td[data-th]::before` 挪到卡片上 |
 | 弹层 | 居中对话框 | 底部上滑面板 |
 | 侧栏 | `position: sticky` + `100dvh` | `fixed` + `translateX(-100%)`，`body.nav-open` 时滑入 |
+| 顶部栏 / 底部 Tab | Tab 隐藏 | `#nav` 吸顶、`#tabbar` `fixed` 钉在屏幕底 |
+
+**手机端的导航不靠外壳高度撑着。** 一开始手机端外壳用的是 `min-height`，内容一长，底部 Tab 就被顶到视口外（实测 y≈2329），表现就是「进了总览退不出去」。改用固定高度后仍然出过问题——因为高度链全建立在 `dvh` 上，而 `dvh` 只有 Chrome 108+（2022-11）才认，**老安卓 WebView 会把整条声明丢掉**，等于没修。所以现在两件事一起做：
+
+1. 每条 `dvh` 前面都补一条 `vh` 兜底（同一规则里后写的覆盖前面的）；
+2. `#nav` 吸顶、`#tabbar` 改 `fixed` 钉在屏幕底，`#view` 用 `padding-bottom` 给它让位——**哪怕外壳高度算错，导航照样够得着**。
+
+测试里有一条破坏性断言专门复刻这个场景：把 `#shell` / `#stage` 的高度强打成 `auto`（等价于老 WebView 丢掉 `dvh`），再检查底部 Tab 是否仍在视口内、是否仍能点中（`elementFromPoint` 命中测试）。
 
 **这套断点是被测试盯住的** —— `tools/e2e-desktop.js` 会把视口切到 1440×900，用 `getComputedStyle` 断言真实计算值。之所以要这么较真：`#menu-btn` 曾经被 `#nav .icon-btn`（权重 `(1,1,0)` > `(1,0,0)`）的 `display:flex` 盖掉，电脑端顶栏一直挂着一个点不动的汉堡，而「元素在不在 DOM 里」这种断言完全看不出来。
 
@@ -223,7 +231,7 @@ app/
 ├── tools/
 │   ├── mock-upstream.js      模拟上游 + 三套中转站面板（自测用，不参与运行）
 │   ├── e2e.js                端到端自测驱动（无头 Chrome + CDP，零依赖）
-│   ├── e2e-page.js           注入页面跑的主套件（139 条断言）
+│   ├── e2e-page.js           注入页面跑的主套件（152 条断言）
 │   ├── e2e-desktop.js        切到 1440×900 复核电脑端真实计算值（22 条）
 │   ├── shot.js               出 README 截图（桌面 1440 / 手机 390 两组）
 │   └── build-android.ps1     跑 APK 编译
@@ -242,7 +250,7 @@ node server.js               # 另开一个终端
 node tools/e2e.js
 ```
 
-会自己拉起模拟上游、用无头 Chrome 驱动真实页面、跑完 **168 条断言**再收尾：
+会自己拉起模拟上游、用无头 Chrome 驱动真实页面、跑完 **174 条断言**再收尾：
 
 ```
   OK  坏密钥被归类为 auth_invalid
@@ -261,7 +269,8 @@ node tools/e2e.js
   OK  窄屏计算值：表格被降级成卡片（table 变成 block）
   OK  窄屏几何：底部 Tab 钉在视口内，没有被内容推出屏幕外
   OK  窄屏几何：卡片里的值真的落在视口内
-结果：168 / 168 通过
+  OK  窄屏破坏性复核：外壳高度被打成 auto（等于老 WebView 丢掉 dvh）后，底部 Tab 仍在视口内
+结果：174 / 174 通过
 ```
 
 **「RSA-OAEP 被真私钥解开」是怎么验的**：模拟面板启动时用 `crypto.generateKeyPairSync` 现生成一对真 RSA 密钥，公钥下发给页面、私钥留在服务端。页面用 WebCrypto 按 `RSA-OAEP(SHA-256)` 加密密码提交，服务端拿私钥去解 —— **解得开，才说明浏览器侧的实现是字节级正确的**，而不是「看着像对」。这条路径在真站点上没法调试，只能在本地把它证明出来。

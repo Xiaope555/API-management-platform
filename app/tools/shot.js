@@ -81,6 +81,12 @@ const SHOTS = [
     after: "document.body.classList.add('nav-open')",
   },
   { file: '09-mobile-cards.png', view: 'mobile', nav: "go('logs')" },
+  {
+    /* 总览页本身（不开抽屉）：顶栏 + 底部 Tab 都在，退得出去 */
+    file: '10-mobile-nav.png',
+    view: 'mobile',
+    nav: "go('overview')",
+  },
 ];
 
 async function jsonOf(url) {
@@ -111,15 +117,19 @@ async function jsonOf(url) {
   };
 
   let target = null;
+  /* 要截的页面按 APP 的 host 来匹配 —— 这里别硬编码 8787：
+     本机上常常已经有一个服务占着 8787（新起的会顺延到 8788），
+     写死端口会变成「Chrome 起来了但匹配不到页面」，报错还看不出原因。 */
+  const APP_HOST = (() => { try { return new URL(APP).host; } catch (_) { return '127.0.0.1:8787'; } })();
   for (let i = 0; i < 80; i++) {
     try {
       const list = await jsonOf('http://127.0.0.1:' + PORT + '/json/list');
-      target = list.find((t) => t.type === 'page' && String(t.url).indexOf('127.0.0.1:8787') >= 0);
+      target = list.find((t) => t.type === 'page' && String(t.url).indexOf(APP_HOST) >= 0);
       if (target && target.webSocketDebuggerUrl) break;
     } catch (_) {}
     await sleep(250);
   }
-  if (!target) { cleanup(); console.error('FAIL 连不上调试端口'); process.exit(2); }
+  if (!target) { cleanup(); console.error('FAIL 连不上调试端口（没找到 ' + APP + ' 的页面）'); process.exit(2); }
 
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });

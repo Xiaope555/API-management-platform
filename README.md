@@ -176,7 +176,7 @@ Windows 上更省事：**双击 `app/start.bat`**。它会检查有没有 Node�
 │   ├── tools/
 │   │   ├── mock-upstream.js    模拟上游 + 模拟中转站面板（自测用，不参与运行）
 │   │   ├── e2e.js              端到端自测驱动（无头 Chrome + CDP，零依赖）
-│   │   ├── e2e-page.js         注入页面跑的主套件（146 条）
+│   │   ├── e2e-page.js         注入页面跑的主套件（152 条）
 │   │   ├── e2e-desktop.js      切到 1440×900 复核电脑端计算值（22 条）
 │   │   ├── shot.js             出 README 截图
 │   │   └── build-android.ps1   跑 APK 编译
@@ -212,7 +212,8 @@ npm test
   OK  窄屏计算值：表格被降级成卡片（table 变成 block）
   OK  窄屏几何：底部 Tab 钉在视口内，没有被内容推出屏幕外   ← 「进了总览退不出去」就是它
   OK  窄屏几何：卡片里的值真的落在视口内                 ← 曾被 .tbl.wide 的 min-width 推出去
-结果：168 / 168 通过
+  OK  窄屏破坏性复核：外壳高度被打成 auto 后 Tab 仍在视口内  ← 复刻老 WebView 丢掉 dvh 的状态
+结果：174 / 174 通过
 ```
 
 **那个「RSA-OAEP 被真私钥解开」是怎么验的**：模拟面板启动时用 `crypto.generateKeyPairSync` 现生成一对真 RSA 密钥，公钥下发给页面、私钥留在服务端。页面用 WebCrypto 按 `RSA-OAEP(SHA-256)` 加密密码提交，服务端拿私钥去解 —— **解得开，才说明浏览器侧的实现是字节级正确的**，而不是「看着像对」。这条路径在真站点上没法调试，只能在本地把它证明出来。

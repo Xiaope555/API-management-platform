@@ -74,14 +74,21 @@ table { border-collapse: collapse; }
 /* 外壳底色分成两条竖带：左栏跟侧栏同色，右侧跟页面同色。
    侧栏本身是 sticky + height:100dvh，只盖住视口那一段；
    页面比视口高时（内容长了），左栏剩下的部分由 #shell 的底色补上，
-   这样缩放页面、整页截图、打印时左栏都是连续的一整条，不会在中间断色。 */
-#shell { display: flex; min-height: 100dvh; background: var(--card); }
+   这样缩放页面、整页截图、打印时左栏都是连续的一整条，不会在中间断色。
+
+   ⚠️ 每条 dvh 前面都必须先写一条 vh 兜底：
+   dvh 只有 Chrome 108+ / 新 WebView 才认，老 WebView（安卓 8、9 上很常见）
+   会整条声明丢掉 —— 那样 `height:100dvh` 失效 = 外壳撑不住一屏，
+   底部 Tab 又会被内容顶出屏幕，手机端就变成「进了总览退不出去」。
+   同一规则里后写的声明会覆盖前一条，所以顺序必须是先 vh 再 dvh。 */
+#shell { display: flex; min-height: 100vh; min-height: 100dvh; background: var(--card); }
 
 #stage {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
+  min-height: 100vh;
   min-height: 100dvh;
   background: var(--bg);
 }
@@ -97,6 +104,7 @@ table { border-collapse: collapse; }
   flex-direction: column;
   position: sticky;
   top: 0;
+  height: 100vh;
   height: 100dvh;
   z-index: 70;
 }
@@ -247,16 +255,33 @@ table { border-collapse: collapse; }
   /* 手机端的外壳必须钉满一屏，只有 #view 自己滚 ——
      否则内容一长，#nav 和 #tabbar 会被推出视口（实测底部 Tab 被推到 y≈2300，
      用户根本够不着，就觉得「进了总览退不出去」）。
-     电脑端不这么干：那边靠 sticky 侧栏 + 整页滚动。 */
-  #shell { height: 100dvh; }
-  #stage { height: 100dvh; min-height: 0; overflow: hidden; }
+     电脑端不这么干：那边靠 sticky 侧栏 + 整页滚动。
+
+     另外高度链不能是唯一保障：老 WebView 不认 dvh（见文件开头那段说明），
+     所以顶栏和底部 Tab 各自再贴一次屏幕，哪怕外壳高度算错也照样够得着。 */
+  #shell { height: 100vh; height: 100dvh; }
+  #stage { height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; }
   #view { min-height: 0; }
+
+  /* 顶栏吸顶：内容再长也挂在视口最上面 */
+  #nav { position: sticky; top: 0; z-index: 60; }
+
+  /* 底部 Tab 直接 fixed 钉在屏幕底，不再依赖 #shell 的高度算得对不对。
+     它脱出文档流后，用 #view 的 padding-bottom 给它让位；再补一层不透明底色，
+     免得内容从胶囊按钮两侧的空隙里透出来。 */
+  #tabbar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
+    background: var(--bg);
+    padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  }
+  #view { padding-bottom: calc(var(--tab-h) + 14px); }
 
   #sidebar {
     position: fixed; left: 0; top: 0; bottom: 0;
     transform: translateX(-100%);
     transition: transform .24s cubic-bezier(.32,.72,0,1);
     box-shadow: 0 0 40px rgba(34,32,29,.2);
+    height: 100vh;
     height: 100dvh;
   }
   body.nav-open #sidebar { transform: none; }
@@ -264,7 +289,6 @@ table { border-collapse: collapse; }
 
   #nav #menu-btn { display: flex; }
   #shell { padding-top: env(safe-area-inset-top); }
-  #tabbar { padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
   /* 抽屉打开时锁住底下的滚动 */
   body.nav-open { overflow: hidden; }
 }

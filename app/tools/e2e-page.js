@@ -502,6 +502,18 @@
   ok('布局：样式表里窄屏下隐藏了底部 Tab 之外的侧栏',
     /#sidebar\s*\{[^}]*transform:\s*translateX\(-100%\)/.test(cssText), '');
 
+  /* --- 20.3 dvh 必须有 vh 兜底 ---
+     `dvh` 是 Chrome 108+（2022-11）才有的单位，老安卓 WebView 整条声明会丢掉。
+     曾经踩过：高度链全靠 dvh，老机器上一失效，底部 Tab 又被顶出屏幕 ——
+     手机上表现为「进了总览退不出去」，而新浏览器里完全复现不出来。 */
+  (function () {
+    const chunks = cssText.split('}');
+    const naked = chunks.filter((c) => /100dvh/.test(c) && !/100vh/.test(c));
+    ok('样式表：每条 dvh 前面都有 vh 兜底（老 WebView 不认 dvh）',
+      naked.length === 0,
+      naked.length ? naked.slice(0, 2).map((s) => s.trim().slice(-40)) : '所有 dvh 都有 vh 兜底');
+  })();
+
   /* --- 20.4 窄屏「真实计算值」复核 ---
      光断言 DOM 里有没有元素是不够的：`#menu-btn` 曾经因为权重被 `.icon-btn`
      盖住，电脑端一直顶着一个无效汉堡，而 DOM 断言完全看不出来。
@@ -514,8 +526,15 @@
 
   if (narrow) {
     go('overview');
-    ok('窄屏计算值：顶栏汉堡按钮是显示的', disp('#menu-btn') !== 'none', disp('#menu-btn'));
+    ok('窄屏计算值：顶栏的汉堡按钮是显示的', disp('#menu-btn') !== 'none', disp('#menu-btn'));
     ok('窄屏计算值：底部 Tab 是显示的', disp('#tabbar') !== 'none', disp('#tabbar'));
+    /* 导航不靠外壳高度撑着：高度链失效（老 WebView 不认 dvh）时也必须够得着 */
+    ok('窄屏计算值：顶栏是吸顶的（内容滚走它不动）',
+      getComputedStyle(document.querySelector('#nav')).position === 'sticky',
+      getComputedStyle(document.querySelector('#nav')).position);
+    ok('窄屏计算值：底部 Tab 是 fixed 钉在屏幕底，不依赖外壳高度',
+      getComputedStyle(document.querySelector('#tabbar')).position === 'fixed',
+      getComputedStyle(document.querySelector('#tabbar')).position);
     ok('窄屏计算值：侧栏默认被推到屏幕外', disp('#sidebar') !== 'none', disp('#sidebar'));
     ok('窄屏计算值：侧栏 transform 把它移出视口',
       /matrix\(1,\s*0,\s*0,\s*1,\s*-|translateX\(-/.test(getComputedStyle(document.querySelector('#sidebar')).transform) ||
@@ -563,6 +582,13 @@
       view.clientHeight < view.scrollHeight,
       view.clientHeight + ' < ' + view.scrollHeight);
 
+    /* Tab 现在是 fixed 脱出文档流的，得确认内容给它让了位，
+       否则最后几条日志会被压在胶囊按钮底下点不到 */
+    const tabH = document.querySelector('#tabbar').getBoundingClientRect().height;
+    const padB = parseFloat(getComputedStyle(view).paddingBottom) || 0;
+    ok('窄屏几何：#view 的底部内边距给固定 Tab 让出了位置',
+      padB >= tabH - 1, { paddingBottom: padB, tabHeight: Math.round(tabH) });
+
     /* --- 20.6 窄屏几何：卡片里的「值」必须落在视口内 ---
        `.tbl.wide { min-width: 900px }`（权重 (0,2,0)）曾盖过窄屏的
        `.tbl { min-width: 0 }`（(0,1,0)），日志表在 390 视口下仍保持 ~870 宽，
@@ -589,6 +615,31 @@
     ok('窄屏几何：总览页底部 Tab 同样够得着',
       tab2 && tab2.top < vh && tab2.bottom <= vh + 1,
       { top: tab2 && tab2.top, bottom: tab2 && tab2.bottom, vh: vh });
+
+    /* --- 20.7 破坏性复核：把高度链打断，导航还得在 ---
+       老 WebView 不认 dvh，`height:100dvh` 会被整条丢掉 —— 效果等同于
+       「外壳没有高度」。这里直接把 #shell / #stage 的高度强打成 auto 来复刻那个状态，
+       检查底部 Tab 是否仍然钉在屏幕内。这条断言能不能过，取决于 Tab 是 fixed 而不是靠排流。 */
+    const breaker = document.createElement('style');
+    breaker.textContent = '#shell{height:auto !important}' +
+      '#stage{height:auto !important;min-height:0 !important;overflow:visible !important}';
+    document.head.appendChild(breaker);
+    await sleep(80);
+    const tab3 = r('#tabbar');
+    const tabHit = (function () {
+      const el = document.querySelector('#tabbar [data-tab]');
+      if (!el) return false;
+      const b = el.getBoundingClientRect();
+      if (b.width === 0) return false;
+      const top = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
+      return top === el || el.contains(top);
+    })();
+    ok('窄屏破坏性复核：外壳高度被打成 auto（等于老 WebView 丢掉 dvh）后，底部 Tab 仍在视口内',
+      tab3 && tab3.top < vh && tab3.bottom <= vh + 1,
+      { top: tab3 && tab3.top, bottom: tab3 && tab3.bottom, vh: vh });
+    ok('窄屏破坏性复核：这时底部 Tab 依然点得到（命中测试通过）', tabHit, tabHit);
+    breaker.remove();
+    await sleep(60);
   } else {
     ok('窄屏计算值：当前视口不是窄屏，跳过（由 e2e-desktop 复核电脑端）', true, window.innerWidth);
   }
